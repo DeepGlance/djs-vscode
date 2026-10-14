@@ -1,0 +1,69 @@
+m02.d(8): Error: Expression reads a default initialized variable that is a floating point type
+        float y = x * 2;
+                  ^
+m02.d(8):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+        float y = x * 2;
+                  ^
+m02.d(7):        For variable `x`
+        float x;
+              ^
+m02.d(7):        Initialize to float.nan or 0 explicitly to disable this error
+        float x;
+              ^
+m02.d(11): Error: Dereference on null variable `z`
+            int w = *z;
+                    ^
+m02.d(13): Error: Expression reads a default initialized variable that is a floating point type
+            float t = u + a;
+                      ^
+m02.d(13):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+            float t = u + a;
+                      ^
+m02.d(12):        For variable `u`
+            float u;
+                  ^
+m02.d(12):        Initialize to float.nan or 0 explicitly to disable this error
+            float u;
+                  ^
+m02.d(17): Error: Dereference on null variable `q1`
+    int k1 = *q1;
+             ^
+m02.d(18): Error: Dereference on null variable `q2`
+    int k2 = *q2;
+             ^
+m02.d(19): Error: Expression reads a default initialized variable that is a floating point type
+    float dd = d * e;
+               ^
+m02.d(19):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    float dd = d * e;
+               ^
+m02.d(3):        For variable `d`
+    float a; float b; float d; float e;
+                            ^
+m02.d(3):        Initialize to float.nan or 0 explicitly to disable this error
+    float a; float b; float d; float e;
+                            ^
+m02.d(19): Error: Expression reads a default initialized variable that is a floating point type
+    float dd = d * e;
+                   ^
+m02.d(19):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    float dd = d * e;
+                   ^
+m02.d(3):        For variable `e`
+    float a; float b; float d; float e;
+                                     ^
+m02.d(3):        Initialize to float.nan or 0 explicitly to disable this error
+    float a; float b; float d; float e;
+                                     ^
+m02.d(20): Error: Dereference on null variable `q6`
+    int k3 = *q6;
+             ^
+m02.d(21): Error: Dereference on null variable `q3`
+    int k4 = *q3;
+             ^
+m02.d(23): Error: Assert can be proven to be false
+    assert(never);
+           ^
+m02.d(24): Error: Assert can be proven to be false
+    assert(q4 !is null);
+              ^

@@ -1,0 +1,9 @@
+m04.d(25): Error: Assert can be proven to be false
+            assert(z3);
+                   ^
+m04.d(12): Error: Assert can be proven to be false
+            assert(z1);
+                   ^
+m04.d(19): Error: Assert can be proven to be false
+            assert(z2);
+                   ^

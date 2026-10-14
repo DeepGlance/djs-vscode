@@ -1,0 +1,33 @@
+m10.d(11): Error: Dereference on null variable `a3`
+            int t = *a3;
+                    ^
+m10.d(12): Error: Expression reads a default initialized variable that is a floating point type
+            float y = x * 2;
+                      ^
+m10.d(12):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+            float y = x * 2;
+                      ^
+m10.d(7):        For variable `x`
+        int* a2; float x;
+                       ^
+m10.d(7):        Initialize to float.nan or 0 explicitly to disable this error
+        int* a2; float x;
+                       ^
+m10.d(15): Error: Dereference on null variable `a2`
+        int t2 = *a2;
+                 ^
+m10.d(17): Error: Dereference on null variable `arg1`
+    int t3 = *arg1;
+             ^
+m10.d(18): Error: Dereference on null variable `b`
+    int t4 = *b;
+             ^
+m10.d(19): Error: Dereference on null variable `a`
+    int t5 = *a;
+             ^
+m10.d(20): Error: Dereference on null variable `z`
+    if (c) { int* z; int t6 = *z; }
+                              ^
+m10.d(21): Error: Dereference on null variable `z`
+    else { int* z; int t7 = *z; }
+                            ^

@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.extension.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["*.ts", "../extension/*.cts", "../tests/vscode/*.cts"],
+  "exclude": []
+}

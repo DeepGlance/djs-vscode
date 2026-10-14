@@ -1,0 +1,165 @@
+m09.d(2503): Error: Dereference on null variable `p211`
+    int v211 = *p211; float r211 = f211 * 2;
+               ^
+m09.d(2503): Error: Expression reads a default initialized variable that is a floating point type
+    int v211 = *p211; float r211 = f211 * 2;
+                                   ^
+m09.d(2503):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v211 = *p211; float r211 = f211 * 2;
+                                   ^
+m09.d(213):        For variable `f211`
+    int* p211; float f211;
+                     ^
+m09.d(213):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p211; float f211;
+                     ^
+m09.d(2504): Error: Dereference on null variable `p422`
+    int v422 = *p422; float r422 = f422 * 2;
+               ^
+m09.d(2504): Error: Expression reads a default initialized variable that is a floating point type
+    int v422 = *p422; float r422 = f422 * 2;
+                                   ^
+m09.d(2504):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v422 = *p422; float r422 = f422 * 2;
+                                   ^
+m09.d(424):        For variable `f422`
+    int* p422; float f422;
+                     ^
+m09.d(424):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p422; float f422;
+                     ^
+m09.d(2505): Error: Dereference on null variable `p633`
+    int v633 = *p633; float r633 = f633 * 2;
+               ^
+m09.d(2505): Error: Expression reads a default initialized variable that is a floating point type
+    int v633 = *p633; float r633 = f633 * 2;
+                                   ^
+m09.d(2505):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v633 = *p633; float r633 = f633 * 2;
+                                   ^
+m09.d(635):        For variable `f633`
+    int* p633; float f633;
+                     ^
+m09.d(635):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p633; float f633;
+                     ^
+m09.d(2506): Error: Dereference on null variable `p844`
+    int v844 = *p844; float r844 = f844 * 2;
+               ^
+m09.d(2506): Error: Expression reads a default initialized variable that is a floating point type
+    int v844 = *p844; float r844 = f844 * 2;
+                                   ^
+m09.d(2506):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v844 = *p844; float r844 = f844 * 2;
+                                   ^
+m09.d(846):        For variable `f844`
+    int* p844; float f844;
+                     ^
+m09.d(846):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p844; float f844;
+                     ^
+m09.d(2507): Error: Dereference on null variable `p1055`
+    int v1055 = *p1055; float r1055 = f1055 * 2;
+                ^
+m09.d(2507): Error: Expression reads a default initialized variable that is a floating point type
+    int v1055 = *p1055; float r1055 = f1055 * 2;
+                                      ^
+m09.d(2507):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v1055 = *p1055; float r1055 = f1055 * 2;
+                                      ^
+m09.d(1057):        For variable `f1055`
+    int* p1055; float f1055;
+                      ^
+m09.d(1057):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p1055; float f1055;
+                      ^
+m09.d(2508): Error: Dereference on null variable `p1266`
+    int v1266 = *p1266; float r1266 = f1266 * 2;
+                ^
+m09.d(2508): Error: Expression reads a default initialized variable that is a floating point type
+    int v1266 = *p1266; float r1266 = f1266 * 2;
+                                      ^
+m09.d(2508):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v1266 = *p1266; float r1266 = f1266 * 2;
+                                      ^
+m09.d(1268):        For variable `f1266`
+    int* p1266; float f1266;
+                      ^
+m09.d(1268):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p1266; float f1266;
+                      ^
+m09.d(2509): Error: Dereference on null variable `p1477`
+    int v1477 = *p1477; float r1477 = f1477 * 2;
+                ^
+m09.d(2509): Error: Expression reads a default initialized variable that is a floating point type
+    int v1477 = *p1477; float r1477 = f1477 * 2;
+                                      ^
+m09.d(2509):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v1477 = *p1477; float r1477 = f1477 * 2;
+                                      ^
+m09.d(1479):        For variable `f1477`
+    int* p1477; float f1477;
+                      ^
+m09.d(1479):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p1477; float f1477;
+                      ^
+m09.d(2510): Error: Dereference on null variable `p1688`
+    int v1688 = *p1688; float r1688 = f1688 * 2;
+                ^
+m09.d(2510): Error: Expression reads a default initialized variable that is a floating point type
+    int v1688 = *p1688; float r1688 = f1688 * 2;
+                                      ^
+m09.d(2510):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v1688 = *p1688; float r1688 = f1688 * 2;
+                                      ^
+m09.d(1690):        For variable `f1688`
+    int* p1688; float f1688;
+                      ^
+m09.d(1690):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p1688; float f1688;
+                      ^
+m09.d(2511): Error: Dereference on null variable `p1899`
+    int v1899 = *p1899; float r1899 = f1899 * 2;
+                ^
+m09.d(2511): Error: Expression reads a default initialized variable that is a floating point type
+    int v1899 = *p1899; float r1899 = f1899 * 2;
+                                      ^
+m09.d(2511):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v1899 = *p1899; float r1899 = f1899 * 2;
+                                      ^
+m09.d(1901):        For variable `f1899`
+    int* p1899; float f1899;
+                      ^
+m09.d(1901):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p1899; float f1899;
+                      ^
+m09.d(2512): Error: Dereference on null variable `p2110`
+    int v2110 = *p2110; float r2110 = f2110 * 2;
+                ^
+m09.d(2512): Error: Expression reads a default initialized variable that is a floating point type
+    int v2110 = *p2110; float r2110 = f2110 * 2;
+                                      ^
+m09.d(2512):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v2110 = *p2110; float r2110 = f2110 * 2;
+                                      ^
+m09.d(2112):        For variable `f2110`
+    int* p2110; float f2110;
+                      ^
+m09.d(2112):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p2110; float f2110;
+                      ^
+m09.d(2513): Error: Dereference on null variable `p2321`
+    int v2321 = *p2321; float r2321 = f2321 * 2;
+                ^
+m09.d(2513): Error: Expression reads a default initialized variable that is a floating point type
+    int v2321 = *p2321; float r2321 = f2321 * 2;
+                                      ^
+m09.d(2513):        It will have the value of Not Any Number(nan), it will be propagated with mathematical operations
+    int v2321 = *p2321; float r2321 = f2321 * 2;
+                                      ^
+m09.d(2323):        For variable `f2321`
+    int* p2321; float f2321;
+                      ^
+m09.d(2323):        Initialize to float.nan or 0 explicitly to disable this error
+    int* p2321; float f2321;
+                      ^

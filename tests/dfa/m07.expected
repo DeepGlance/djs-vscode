@@ -1,0 +1,9 @@
+m07.d(10): Error: Variable `p2` was required to be non-null and has become null
+        foreach (j; 0 .. 2)
+        ^
+m07.d(10): Error: Variable `p3` was required to be non-null and has become null
+        foreach (j; 0 .. 2)
+        ^
+m07.d(6): Error: Variable `p1` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^

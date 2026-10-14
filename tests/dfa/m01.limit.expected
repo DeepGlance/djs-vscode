@@ -1,0 +1,61 @@
+m01.d(27): Error: Dereference on null variable `p24`
+    int v24 = *p24;
+              ^
+m01.d(28): Error: Dereference on null variable `p23`
+    int v23 = *p23;
+              ^
+m01.d(29): Error: Dereference on null variable `p22`
+    int v22 = *p22;
+              ^
+m01.d(30): Error: Dereference on null variable `p21`
+    int v21 = *p21;
+              ^
+m01.d(31): Error: Dereference on null variable `p20`
+    int v20 = *p20;
+              ^
+m01.d(32): Error: Dereference on null variable `p19`
+    int v19 = *p19;
+              ^
+m01.d(33): Error: Dereference on null variable `p18`
+    int v18 = *p18;
+              ^
+m01.d(34): Error: Dereference on null variable `p17`
+    int v17 = *p17;
+              ^
+m01.d(35): Error: Dereference on null variable `p16`
+    int v16 = *p16;
+              ^
+m01.d(36): Error: Dereference on null variable `p15`
+    int v15 = *p15;
+              ^
+m01.d(37): Error: Dereference on null variable `p14`
+    int v14 = *p14;
+              ^
+m01.d(38): Error: Dereference on null variable `p13`
+    int v13 = *p13;
+              ^
+m01.d(39): Error: Dereference on null variable `p12`
+    int v12 = *p12;
+              ^
+m01.d(40): Error: Dereference on null variable `p11`
+    int v11 = *p11;
+              ^
+m01.d(41): Error: Dereference on null variable `p10`
+    int v10 = *p10;
+              ^
+m01.d(42): Error: Dereference on null variable `p9`
+    int v9 = *p9;
+             ^
+m01.d(43): Error: Dereference on null variable `p8`
+    int v8 = *p8;
+             ^
+m01.d(44): Error: Dereference on null variable `p7`
+    int v7 = *p7;
+             ^
+m01.d(45): Error: Dereference on null variable `p6`
+    int v6 = *p6;
+             ^
+m01.d(46): Error: Dereference on null variable `p5`
+    int v5 = *p5;
+             ^
+error limit (20) reached, use `-verrors=0` to show all

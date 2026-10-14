@@ -1,0 +1,236 @@
+{
+  "name": "djs",
+  "displayName": "djs",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "description": "D diagnostics, hovers, completion and highlighting from the D frontend itself: djs, the LDC 1.43.0 frontend ported to TypeScript, running inside VS Code with no D toolchain installed",
+  "icon": "extension/icon.png",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DeepGlance/djs-vscode"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "d",
+    "dlang",
+    "ldc",
+    "dmd",
+    "diagnostics",
+    "hover",
+    "completion",
+    "semantic highlighting"
+  ],
+  "publisher": "deepglance",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "main": "./dist/extension/extension.cjs",
+  "activationEvents": [
+    "onLanguage:d"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "d",
+        "aliases": [
+          "D"
+        ],
+        "extensions": [
+          ".d",
+          ".di"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "d",
+        "scopeName": "source.d",
+        "path": "./syntaxes/d.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "djs",
+      "properties": {
+        "djs.ldc2Line": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "The ldc2 command line your build uses for this repository (for example `ldc2 -i -Isrc -Jviews --vcolumns -mtriple=aarch64-linux-gnu --preview=dip1000 -d-debug`). The compile keeps its compile-defining flags, `-i` included, and drops the build-only ones (`-c`, `-of`, `-L`, `-g`, `--deps`, the inputs)."
+        },
+        "djs.ldcRoot": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "An ldc2 1.43.0 install (its root, holding `import/object.d`) whose import tree replaces the LDC 1.43.0 tree bundled with djs. Empty: the bundled tree."
+        },
+        "djs.target": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "The target when `djs.ldc2Line` has no `-mtriple`: `aarch64-linux-gnu`, `x86_64-linux-gnu`, or an arm64 Mac triple (`arm64-apple-darwin`, with its Darwin version, `arm64-apple-darwin24.0.0`, or a macOS one, `arm64-apple-macos15`). Empty: the host's (an arm64 Mac, or Linux on aarch64 or x86_64; djs refuses other hosts without a target)."
+        },
+        "djs.compileOnPause": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Compile a D file of the workspace after a pause in typing (`#djs.compileOnPauseDelay#`), from the editor's text, without saving it: the diagnostics, hovers, tokens and hints follow the unsaved text. Every compile, a save's too, reads the open D files with unsaved edits from the editor. A compile in progress is not interrupted; the next one compiles the latest text."
+        },
+        "djs.compileOnPauseDelay": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 50,
+          "scope": "resource",
+          "markdownDescription": "The pause in typing, in milliseconds, after which `#djs.compileOnPause#` compiles the edited file; a value below 50 counts as 50."
+        },
+        "djs.semanticTokens": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Colour each identifier of a D file by what it names in the last compile (namespace, type, function, variable, parameter, member, enum member; `readonly`, `static`, `deprecated`, `defaultLibrary`), over the grammar's colours. The tokens are those of the last compile; while the file has edits not yet compiled the editor keeps the previous ones."
+        },
+        "djs.inlayHints.types": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Show the type the last compile inferred: `: T` after a variable declared without one (`auto x`, `const x = 1`, a `foreach` variable), `-> T` after the parameters of a function whose return type is inferred."
+        },
+        "djs.inlayHints.parameterNames": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Show the parameter's name before each argument of a call (`name:`), on the overload the last compile picked; not when the argument is that name already."
+        },
+        "djs.inlayHints.instanceCounts": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Show after a template's name how many instances the last compile created of it, the first ones in the tooltip; nothing for a template with none."
+        },
+        "djs.dimInactiveCode": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Dim the branches of `version`, `debug` and `static if` the last compile did not choose for this repository's target and flags (`djs.ldc2Line`)."
+        },
+        "djs.inactiveCodeOpacity": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "The opacity of the branches `djs.dimInactiveCode` dims, from 0 (hidden) to 1 (not dimmed)."
+        },
+        "djs.expansionLenses": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Show a code lens over each construct the last compile expanded (a string mixin, a template instance, a folded value); clicking it peeks at the expansion, as **djs: Show Expansion** does at the cursor."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "djs.showExpansion",
+        "title": "djs: Show Expansion"
+      },
+      {
+        "command": "djs.showAst",
+        "title": "djs: Show AST"
+      },
+      {
+        "command": "djs.instancesCurrentFile",
+        "title": "Current File Only",
+        "icon": "$(file)"
+      },
+      {
+        "command": "djs.instancesAllFiles",
+        "title": "All Files",
+        "icon": "$(files)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "djs.instances",
+          "name": "D Instances",
+          "when": "djs.active"
+        },
+        {
+          "id": "djs.imports",
+          "name": "D Imports",
+          "when": "djs.active"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "djs.showExpansion",
+          "when": "editorLangId == d && resourceScheme == file",
+          "group": "navigation"
+        },
+        {
+          "command": "djs.showAst",
+          "when": "editorLangId == d && resourceScheme == file",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "djs.instancesCurrentFile",
+          "when": "view == djs.instances && !djs.instancesCurrentFile",
+          "group": "navigation"
+        },
+        {
+          "command": "djs.instancesAllFiles",
+          "when": "view == djs.instances && djs.instancesCurrentFile",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "djs.showExpansion",
+          "when": "editorLangId == d && resourceScheme == file"
+        },
+        {
+          "command": "djs.showAst",
+          "when": "editorLangId == d && resourceScheme == file"
+        },
+        {
+          "command": "djs.instancesCurrentFile",
+          "when": "false"
+        },
+        {
+          "command": "djs.instancesAllFiles",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc -p tsconfig.extension.json",
+    "test:host": "vitest run -c vitest.extension.config.ts",
+    "test:vscode": "node tests/vscode/run.ts",
+    "bundle": "esbuild extension/extension.cts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension/extension.cjs --log-level=warning && esbuild host/compiler.ts host/flags.ts host/ast.ts host/worker.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist/host --log-level=warning",
+    "vscode:prepublish": "npm run bundle",
+    "package": "vsce package --no-dependencies --readme-path extension/README.md --changelog-path extension/CHANGELOG.md -o \"${DJS_VSCODE_SCRATCH:?set DJS_VSCODE_SCRATCH to the output directory}/\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "~1.140.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

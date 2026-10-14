@@ -1,0 +1,9 @@
+m03.d(13): Error: Assert can be proven to be false
+    assert(z1);
+           ^
+m03.d(17): Error: Assert can be proven to be false
+    assert(z2);
+           ^
+m03.d(22): Error: Assert can be proven to be false
+    assert(z3);
+           ^

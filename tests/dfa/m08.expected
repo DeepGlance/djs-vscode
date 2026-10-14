@@ -1,0 +1,126 @@
+m08.d(303): Error: Dereference on null variable `p7`
+    int v7 = *p7;
+             ^
+m08.d(304): Error: Dereference on null variable `p14`
+    int v14 = *p14;
+              ^
+m08.d(305): Error: Dereference on null variable `p21`
+    int v21 = *p21;
+              ^
+m08.d(306): Error: Dereference on null variable `p28`
+    int v28 = *p28;
+              ^
+m08.d(307): Error: Dereference on null variable `p35`
+    int v35 = *p35;
+              ^
+m08.d(308): Error: Dereference on null variable `p42`
+    int v42 = *p42;
+              ^
+m08.d(309): Error: Dereference on null variable `p49`
+    int v49 = *p49;
+              ^
+m08.d(310): Error: Dereference on null variable `p56`
+    int v56 = *p56;
+              ^
+m08.d(311): Error: Dereference on null variable `p63`
+    int v63 = *p63;
+              ^
+m08.d(312): Error: Dereference on null variable `p70`
+    int v70 = *p70;
+              ^
+m08.d(313): Error: Dereference on null variable `p77`
+    int v77 = *p77;
+              ^
+m08.d(314): Error: Dereference on null variable `p84`
+    int v84 = *p84;
+              ^
+m08.d(315): Error: Dereference on null variable `p91`
+    int v91 = *p91;
+              ^
+m08.d(316): Error: Dereference on null variable `p98`
+    int v98 = *p98;
+              ^
+m08.d(317): Error: Dereference on null variable `p105`
+    int v105 = *p105;
+               ^
+m08.d(318): Error: Dereference on null variable `p112`
+    int v112 = *p112;
+               ^
+m08.d(319): Error: Dereference on null variable `p119`
+    int v119 = *p119;
+               ^
+m08.d(320): Error: Dereference on null variable `p126`
+    int v126 = *p126;
+               ^
+m08.d(321): Error: Dereference on null variable `p133`
+    int v133 = *p133;
+               ^
+m08.d(322): Error: Dereference on null variable `p140`
+    int v140 = *p140;
+               ^
+m08.d(323): Error: Dereference on null variable `p147`
+    int v147 = *p147;
+               ^
+m08.d(324): Error: Dereference on null variable `p154`
+    int v154 = *p154;
+               ^
+m08.d(325): Error: Dereference on null variable `p161`
+    int v161 = *p161;
+               ^
+m08.d(326): Error: Dereference on null variable `p168`
+    int v168 = *p168;
+               ^
+m08.d(327): Error: Dereference on null variable `p175`
+    int v175 = *p175;
+               ^
+m08.d(328): Error: Dereference on null variable `p182`
+    int v182 = *p182;
+               ^
+m08.d(329): Error: Dereference on null variable `p189`
+    int v189 = *p189;
+               ^
+m08.d(330): Error: Dereference on null variable `p196`
+    int v196 = *p196;
+               ^
+m08.d(331): Error: Dereference on null variable `p203`
+    int v203 = *p203;
+               ^
+m08.d(332): Error: Dereference on null variable `p210`
+    int v210 = *p210;
+               ^
+m08.d(333): Error: Dereference on null variable `p217`
+    int v217 = *p217;
+               ^
+m08.d(334): Error: Dereference on null variable `p224`
+    int v224 = *p224;
+               ^
+m08.d(335): Error: Dereference on null variable `p231`
+    int v231 = *p231;
+               ^
+m08.d(336): Error: Dereference on null variable `p238`
+    int v238 = *p238;
+               ^
+m08.d(337): Error: Dereference on null variable `p245`
+    int v245 = *p245;
+               ^
+m08.d(338): Error: Dereference on null variable `p252`
+    int v252 = *p252;
+               ^
+m08.d(339): Error: Dereference on null variable `p259`
+    int v259 = *p259;
+               ^
+m08.d(340): Error: Dereference on null variable `p266`
+    int v266 = *p266;
+               ^
+m08.d(341): Error: Dereference on null variable `p273`
+    int v273 = *p273;
+               ^
+m08.d(342): Error: Dereference on null variable `p280`
+    int v280 = *p280;
+               ^
+m08.d(343): Error: Dereference on null variable `p287`
+    int v287 = *p287;
+               ^
+m08.d(344): Error: Dereference on null variable `p294`
+    int v294 = *p294;
+               ^

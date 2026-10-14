@@ -1,0 +1,13 @@
+**
+!dist/extension/extension.cjs
+!dist/host/compiler.js
+!dist/host/flags.js
+!dist/host/ast.js
+!dist/host/worker.js
+!syntaxes/**
+!language-configuration.json
+!ldc-1.43.0/**
+!extension/icon.png
+!LICENSE
+!extension/README.md
+!extension/CHANGELOG.md

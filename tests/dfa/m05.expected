@@ -1,0 +1,15 @@
+m05.d(7): Error: Dereference on null variable `p3`
+    v = *p3;
+        ^
+m05.d(9): Error: Dereference on null variable `p17`
+    v = *p17;
+        ^
+m05.d(11): Error: Dereference on null variable `p9`
+    v = *p9;
+        ^
+m05.d(13): Error: Dereference on null variable `p1`
+    v = *p1;
+        ^
+m05.d(15): Error: Dereference on null variable `p20`
+    v = *p20;
+        ^

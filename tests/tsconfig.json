@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["corpus/*.ts", "phobos/*.ts"]
+}

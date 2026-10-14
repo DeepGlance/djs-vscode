@@ -1,0 +1,12 @@
+m06.d(9): Error: Dereference on null variable `sp`
+    int v2 = *sp.p;
+                ^
+m06.d(10): Error: Dereference on null variable `a`
+    int v3 = *a;
+             ^
+m06.d(11): Error: Dereference on null variable `b`
+    int v4 = *b;
+             ^
+m06.d(14): Error: Dereference on null variable `q`
+    int v5 = q.x;
+              ^

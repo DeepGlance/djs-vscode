@@ -1,0 +1,36 @@
+m12.d(2515): Error: Variable `p1` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p3` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p5` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p7` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p9` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p11` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p2` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p4` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p6` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p8` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p10` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^
+m12.d(2515): Error: Variable `p12` was required to be non-null and has become null
+    foreach (i; 0 .. 2)
+    ^

@@ -1,0 +1,28 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npx tsc -p host/tsconfig.json
+      # The host lanes: the public fixture (host/fixture/src) and the tests on inline modules; the lanes on private
+      # repositories skip themselves when those are absent. Measured on an arm64 Mac host: on Linux the run is
+      # informational until measured there.
+      - run: npm run test:host
+        continue-on-error: ${{ matrix.os != 'macos-14' }}
+      - name: package the .vsix (bundle and vsce), not published
+        run: npm run package
+        env:
+          DJS_VSCODE_SCRATCH: ${{ runner.temp }}
