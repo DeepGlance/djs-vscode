@@ -1891,8 +1891,9 @@ read-only contract: no `optimize` and no diagnostic during queries (`__ctfe`; ho
 instance whose code holds an unanalysed manifest constant), a kept module queried after a kept compile parsed its
 importer again, and queries, tokens, hints and inactive ranges included, between two kept compiles leaving the second
 equal to a fresh compile, the same with the peeks and a hover at every character, with completions, and with the three
-queries above, every swap they make undone); djs-vscode's host/query.test.ts, host/tokens.test.ts and
-host/hints.test.ts, and its integration test.
+queries above, every swap they make undone); djs-vscode's host/query.private.test.ts, host/tokens.private.test.ts
+and host/hints.private.test.ts (on private programs, skipped where they are absent), host/fixture.test.ts (its public
+fixture), and its integration test.
 
 ### 4.8 Targets
 

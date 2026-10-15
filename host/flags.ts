@@ -1,6 +1,6 @@
-// yab's ldc2 line -> the command line of a save-time compile.
+// The build tool's ldc2 line -> the command line of a save-time compile.
 //
-// The extension does not replay yab's line (Paolo, 10/10): it keeps the flags that change what is compiled or
+// The extension does not replay the build tool's line: it keeps the flags that change what is compiled or
 // diagnosed and drops the ones that only shape the build. Unknown flags are kept, so the shim, not this table,
 // decides what it supports: a flag it refuses shows as `djs: unsupported flag` instead of silently vanishing.
 //
@@ -11,7 +11,7 @@
 // C compiler preprocesses).
 // BUILD-ONLY (dropped): --deps, -c, -of, -od, -op, -oq, -L, -defaultlib, -debuglib, -g*, -fPIC, -lowmem,
 // -disable-linker-strip-dead, the source files and link inputs of the line (the saved file is the one root), and
-// yab's `%s` placeholder.
+// the build tool's `%s` placeholder.
 // ADDED: -c -o- -verrors=0 (the editor-mode contract, 10 §4.7), then the root file.
 
 import { homedir } from "node:os";
@@ -24,12 +24,12 @@ export interface FlagPlan {
     dropped: { flag: string; why: string }[];
 }
 
-/** Splits a command line as yab's shell does for its lines: whitespace only, no quoting in yab's lines. */
+/** Splits a command line as the build tool's shell does for its lines: whitespace only, no quoting in them. */
 export function splitLine(line: string): string[] {
     return line.split(/\s+/).filter((t) => t !== "");
 }
 
-/** `~` and `~/x` to the home directory; yab writes `-J~/Lembas` in its lines (melkor.d:663). */
+/** `~` and `~/x` to the home directory; lines write `-J~/dir`. */
 function expandTilde(p: string): string {
     return p === "~" ? homedir() : p.startsWith("~/") ? homedir() + p.slice(1) : p;
 }
@@ -84,9 +84,9 @@ const DEBUG_INFO = /^-(g|gc|gf|gs|gline-tables-only|gsplit-dwarf|gdwarf.*)$/;
 const INPUT = /\.(d|di|c|h|i|o|a|so|dylib|obj|lib)$/;
 
 /**
- * Plans the save-time command line from `line`, the ldc2 command yab builds for the repository's target
- * (melkor.d's ldc_c_* lines plus the target's flags, or adhoc.d's crossCompileCmd), with or without the compiler
- * path in front. Relative paths resolve against `root`, the repository root, where yab runs ldc2.
+ * Plans the save-time command line from `line`, the ldc2 command a build tool builds for the repository's target
+ * (its compile lines plus the target's flags), with or without the compiler path in front. Relative paths resolve
+ * against `root`, the repository root, where the build tool runs ldc2.
  */
 export function planFlags(line: readonly string[], root: string): FlagPlan {
     const args: string[] = [];

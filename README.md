@@ -1,80 +1,55 @@
-# djs
+# djs for VS Code
 
-The frontend of LDC 1.43.0, the LLVM-based D compiler, ported to TypeScript. djs lexes, parses and analyses D
-source in-process, in Node, and reports what ldc2 reports. It generates no code.
+D language support for VS Code, answered by the D compiler's own frontend. [djs](https://github.com/DeepGlance/djs)
+is the frontend of LDC 1.43.0 (DMD 2.113) ported to TypeScript; this extension runs it in a worker thread inside VS
+Code, so diagnostics, hovers, references and completions are the compiler's, for the flags and the target of your
+build, with no D toolchain installed.
 
-## What it is for
+**Preview.** 0.1.0 is the first release.
 
-- **Diagnostics**: errors, warnings, deprecations and supplemental lines with the same text, locations, order and
-  exit status as `ldmd2 -c -o-`.
-- **The frontend's outputs**: `-vcg-ast` (the lowered AST as D source), `-X` (the JSON description), `-D` (Ddoc
-  HTML), `-v`, `-vgc`, `-vtls`, `-vtemplates`.
-- **A library for tools**: `djsMain(args)` runs one compilation in the calling process; `djsMainKept(args)`
-  recompiles after an edit by replaying the analysis of the modules that did not change; the query functions
-  (`queryHover`, `queryDefinition`, `querySemanticTokens`, `queryInlayHints`, `queryCompletion`, and the others
-  exported by `src/djs.ts`) answer on the AST of the last compilation. These are what an editor extension needs.
+## Features
 
-## Quick start
+Diagnostics on save and after a pause in typing, exactly as ldc2 reports them; hover with what the compiler made of
+the code (lowered operators, UFCS, `alias this`, the overload picked); go to definition; outline; find all
+references and rename; signature help; completion after a dot; semantic highlighting over code-d's TextMate grammar;
+inlay hints; the `version`/`debug`/`static if` branches your target does not compile, dimmed; peeks at string mixins,
+template instances and folded values; the module's AST as `-vcg-ast` prints it; explorers for template instances and
+the import graph. Everything answers from the last compile. The extension's page, with the settings, the targets and
+the limits, is [`extension/README.md`](extension/README.md).
+
+## Requirements
+
+VS Code 1.140 or later on an arm64 Mac or on Linux (aarch64 or x86_64). No LDC, DMD or DUB install: djs runs on the
+Node.js inside VS Code and ships LDC 1.43.0's druntime and Phobos import tree. ImportC needs a C compiler for the
+preprocessor (`$CC` or `cc`).
+
+## Building from source
 
 Node 22 or later.
 
 ```sh
-npm install
-npx tsc --noEmit false                     # emits dist/
-node --stack-size=7600 dist/djs.js -c -o- hello.d
+npm ci
+npm run build                  # dist/: the compiler, the worker, the extension
+npx tsc -p host/tsconfig.json  # type-checks the host and the integration test
+npm run test:host              # the worker and the queries on the fixture in host/fixture/
+npm test                       # the compiler's own suite
+DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-<version>.vsix
 ```
 
-The command line is ldmd2's (DMD spellings, plus the ldc2 spellings ldmd2 passes through). `-c -o-` is the mode
-djs is built for; a switch djs does not support stops the run with status 2 and names the switch.
+Install the `.vsix` with **Extensions: Install from VSIX...**, or `code --install-extension <file>.vsix`.
+`DJS_VSCODE_SCRATCH=<dir> npm run test:vscode` runs the integration test in an installed VS Code, with a user-data and
+extensions directory of its own under `<dir>`.
 
-The D import tree (druntime, Phobos, LDC's own modules, LDC 1.43.0's, unmodified) is bundled in
-`ldc-1.43.0/import`, so no D installation is needed. `--djs-ldc=<root>` makes djs read the import tree of an ldc2
-1.43.0 install instead, and report its `ldc2.conf` as ldc2 would; the oracle tests and runners use it to compare
-djs with that install's `ldmd2`.
+## Repository layout
 
-As a library:
-
-```ts
-import { djsMain } from "./dist/djs.js";
-
-const status = djsMain(["-c", "-o-", "app.d"]);   // 0, or 1 when an error was reported
-```
-
-`djsMain(args, onFatal)` with a handler answering `true` lets the compilation continue past a fatal error (a parse
-error, a missing import), as an editor wants.
-
-## Targets
-
-Without `-mtriple`, the target is the host: `arm64-apple-darwin` on an Apple Silicon Mac,
-`aarch64-unknown-linux-gnu` or `x86_64-unknown-linux-gnu` on Linux. Any other host needs an explicit `-mtriple`.
-Accepted triples: `aarch64-linux-gnu`, `x86_64-linux-gnu` (and their `-unknown-` spellings) and the arm64 Mac's. The
-triple decides what ldc2 decides from it: predefined versions, `real`'s size and format, the C ABI's argument
-types, `__traits(targetCPU)`, the inline assembler rules, the C preprocessor invocation.
-
-## Fidelity and limits
-
-On the DMD test suite shipped with LDC 1.43.0 (`tests/dmd`, 3861 tests), every test djs runs gives ldmd2's exit
-status, stdout, stderr and written files, byte for byte; the tests it does not run are those disabled for the
-target, Objective-C, separate compilation, and switches djs refuses. Every module of the bundled import tree
-compiles with ldmd2's output, `-vcg-ast` included, plain and with `-unittest`.
-
-Known limits and divergences:
-
-- **No code generation.** Object files, linking, `-run` and `-lib` are out of scope; runnable tests are compiled,
-  never run.
-- **Refused switches** include `-H`/`-HC` (header generation), `-m32`, `-lib`, `-mixin=`, `-deps`, `-makedeps`.
-- **DMD-style inline assembler on x86_64** is not analysed: the block is kept as an opaque statement and the module
-  gets one warning (shown under `-wi`/`-w`, never counted as an error). Errors inside the block, and labels or
-  closures created only by it, are not reported. GCC-style `asm` is analysed as ldc2 does. See LICENSE for why.
-- **DCompute** (`@compute` modules) is not supported.
-- **CTFE floating point** computes `real` in the host's double, as ldc2 on an arm64 Mac does, whatever the target's
-  `real` is.
-- **ImportC** runs the system C preprocessor, as ldc2 does; no sysroot is passed unless the command line passes one.
-- **Memory**: an application of a few hundred modules peaks around 2 GiB of RSS on a fresh compile.
-- **The kept-module engine** gives a fresh compile's output, or compiles fresh and says why; its few declared
-  divergences are listed in `docs/architecture.md`.
+- `src/`, `docs/`, `ldc-1.43.0/` and `tests/` except `tests/vscode/`: the compiler, from
+  [DeepGlance/djs](https://github.com/DeepGlance/djs), whose README says what it does and does not do.
+- `host/`: the worker thread and everything that runs without VS Code (the command-line plan, positions, the queue).
+- `extension/`: the VS Code side, with the package's README, CHANGELOG and icon.
+- `tests/vscode/`: the integration test.
+- `syntaxes/`: code-d's TextMate grammar, unmodified (MIT, notice in `syntaxes/LICENSE-code-d`).
 
 ## Licence
 
-Boost Software License 1.0, with the code ported from LDC's own C++ under LDC's three-clause BSD licence and the
-bundled import tree under its own licences. `LICENSE` lists each set.
+BSL-1.0, with the derived sets (DMD, LDC, LLVM behaviour models, code-d's grammar, LDC's import tree) named in
+`LICENSE`.

@@ -5,7 +5,7 @@
 // language-configuration.json, both declared in package.json.
 //
 // A CommonJS entry (VS Code's loader requires extensions); the host modules are ES modules, loaded by dynamic import.
-// Per repository, the setting `djs.ldc2Line` holds the ldc2 command yab builds for the repository's target; the command
+// Per repository, the setting `djs.ldc2Line` holds the ldc2 command of the repository's target; the command
 // line is planned from it by host/flags.ts (compile-defining flags kept, -i among them, build-only dropped), with the
 // saved or edited file as the one root; the setting `djs.ldcRoot` puts `--djs-ldc=<root>` in front (an ldc2 install's
 // import tree; empty, the default: the tree bundled with djs), and `djs.target` adds `-mtriple=<target>` when the line
@@ -84,8 +84,8 @@
 // The AST view (djs 10 §4.7, "Queries"): the command `djs.showAst` opens beside the editor a read-only virtual document
 // of the `djs-ast:` scheme, one per source file, its path the source's with `.d` turned into `.ast.d` (the grammar
 // colours it) and the source's URI as its query: djs's `queryAst` of the file's current text, the module as `-vcg-ast`
-// prints it. A view costs a print of its module at its first request after a compile (labserver.d's, 5.8 MB: seconds in
-// the worker, which serves one request at a time), so after a save's compile the visible views are asked again only
+// prints it. A view costs a print of its module at its first request after a compile (a large module's, 5.8 MB: seconds
+// in the worker, which serves one request at a time), so after a save's compile the visible views are asked again only
 // once the visible D editors' tokens, hints and lenses of that compile are queued (`gateAstRefresh`), a pause compile
 // does not reprint them, and a hidden view is asked when it becomes visible again. VS Code replaces such a large
 // document whole, so a reprint keeps each editor's place through anchors on the declarations under its cursor and its
@@ -1055,8 +1055,8 @@ function refreshAstView(uri: vscode.Uri): void {
 
 /**
  * Asks the visible AST views again (`refreshAstView`) and marks the hidden ones: a view costs a print of its module at
- * the first request after a compile (labserver.d: seconds), and the worker serves one request at a time, so a hidden
- * view asked at every save would delay every hover, token and hint after it.
+ * the first request after a compile (a large program: seconds), and the worker serves one request at a time, so a
+ * hidden view asked at every save would delay every hover, token and hint after it.
  */
 function refreshAstViews(): void {
     const visible = new Set(vscode.window.visibleTextEditors.map((e) => e.document.uri.toString()));
@@ -1108,7 +1108,7 @@ function expectedRequests(): Set<string> {
 
 /**
  * After a compile returned: the AST views are asked again once the visible D editors' requests of that compile are in
- * the worker's queue, so that the reprint (seconds for labserver.d) runs after them, not ahead. The mechanism: the
+ * the worker's queue, so that the reprint (seconds for a large program) runs after them, not ahead. The mechanism: the
  * compile fires the providers' change events, then this records the requests VS Code will send (`expectedRequests`);
  * each provider, once it has queued its request (or answered without one), checks itself off (`requestQueued`); the
  * last one opens the gate. `AST_GATE_MS` bounds the wait for a request VS Code never sends (a theme without semantic

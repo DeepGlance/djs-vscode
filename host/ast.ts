@@ -2,10 +2,11 @@
 // the view's navigation makes on them, and the anchors that keep a place in the view across a reprint. No VS Code
 // dependency, no compiler: the worker packs (host/worker.ts), the extension and the host tests look up.
 //
-// WHY packed: labserver.d's AST under -i has ~65,000 entries. As objects (each with nested ranges and a file string)
-// their structured clone from the worker took ~0.8 s even when djs answered from its kept print in 0.1 ms, and they
-// would sit in the extension host as ~65,000 small objects per open view. Packed, they are one Int32Array of
-// `ENTRY_INTS` numbers per entry and one of file indexes into a short table: a clone of a few MB of buffers.
+// WHY packed: a large program's AST under -i (some 170 files) has ~65,000 entries. As objects (each with nested
+// ranges and a file string) their structured clone from the worker took ~0.8 s even when djs answered from its kept
+// print in 0.1 ms, and they would sit in the extension host as ~65,000 small objects per open view. Packed, they are
+// one Int32Array of `ENTRY_INTS` numbers per entry and one of file indexes into a short table: a clone of a few MB of
+// buffers.
 // The entries' `kind` and `name` are not carried: nothing in the view reads them.
 
 import { resolve } from "node:path";
@@ -93,7 +94,7 @@ function innermostAt(packed: PackedAst, p: Position): number {
  * (resolved) and the identifier's range there; null when no such entry holds `p`. The entries are sorted by start with
  * containers first, so the innermost holding `p` is the latest-starting one: a binary search finds the last entry
  * starting at or before `p`, then a walk back stops at the first one whose print is still open at `p`. Cost: a binary
- * search plus the entries between `p` and its innermost container (labserver.d: under 0.1 ms; ~3 ms when no entry
+ * search plus the entries between `p` and its innermost container (that program: under 0.1 ms; ~3 ms when no entry
  * holds `p` and the walk goes back to the first).
  */
 export function astSourceAt(packed: PackedAst, p: Position): { file: string; range: Range } | null {
@@ -111,7 +112,7 @@ export function astSourceAt(packed: PackedAst, p: Position): { file: string; ran
  * there. Of entries starting at the same place the first wins: a template's own print comes before its instances',
  * so a cursor in a template, a function template or a member of an aggregate template reveals the template's print,
  * not an instance's. Null when the file has no entry starting there. Only functions have an extent. `file` and the
- * entries' files are compared resolved. Cost: one pass over the entries (labserver.d's ~65,000: ~2 ms).
+ * entries' files are compared resolved. Cost: one pass over the entries (the ~65,000: ~2 ms).
  */
 export function astPrintFor(packed: PackedAst, file: string, p: Position): Range | null {
     const f = packed.fileNames.indexOf(resolve(file));

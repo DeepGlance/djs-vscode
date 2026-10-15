@@ -29,22 +29,21 @@ export const STACK_SIZE_MB = 8;
  * out-of-memory abort, a native stack overflow, `process.exit` from a fatal handler) rejects the call in flight with
  * the exit reason; the next call starts a new worker, paying the import of the emit again (~0.2 s), and finds no kept
  * state, so its first compile is fresh (`no kept state`) and a query before it finds no file. `dispose` loses the kept
- * state the same way.
- * Cost per compile: what djsMainKept costs: a fresh compile (seconds for a module importing Phobos) on a worker's
- * first call and whenever the engine falls back, otherwise the changed modules plus the replay of the kept ones;
- * the reply is a few KB. Per query: the worker's index of the file at the first query on it after a compile (dgpro07
- * labserver.d: tens of milliseconds), then well under a millisecond, plus the message round trip; the semantic tokens
- * of a file, one pass over it (labserver.d under -i: ~9000 tokens, 180 KB copied back, ~30-40 ms in the worker,
- * ~70-90 ms when the query builds the file's index); the inlay hints of the whole file (labserver.d: ~1800 hints,
- * ~27 ms, ~75 ms with the index build); its inactive ranges, ~2 ms once per compile, then kept with the index; its
- * expansion sites (labserver.d: 41), ~60-90 ms with the index build, then ~0.2 ms; one expansion, ~0.15 ms (up to
- * ~15 ms for a large instance printed by hdrgen), round trip ~0.3-0.5 ms more; a module's AST, one hdrgen print of
- * it at the first request after a compile, then kept by djs (labserver.d under -i: 5.8 MB, 65,000 entries, seconds;
- * ~30 ms after, the packing of the entries and the copy included); the instances, djs's instance table at the first
- * need after a compile (labserver.d's 168 own files: ~0.4 s); the imports, one pass over the modules (~30 ms); a
- * completion (labserver.d under -i, 44-71 items, at load 9), ~50 ms with the index build, then ~2-7 ms, the most
- * for a receiver with UFCS candidates (`arg.`: 64). A compile with `texts` copies them to the worker on top of its
- * cost (labserver.d with a one-line edit in a function body, kept from the buffer: ~0.9 s at load 9).
+ * state the same way. Cost per compile: what djsMainKept costs: a fresh compile (seconds for a module importing Phobos)
+ * on a worker's first call and whenever the engine falls back, otherwise the changed modules plus the replay of the
+ * kept ones; the reply is a few KB. Per query: the worker's index of the file at the first query on it after a compile
+ * (a large program under -i, some 170 files: tens of milliseconds), then well under a millisecond, plus the message
+ * round trip; the semantic tokens of a file, one pass over it (that program: ~9000 tokens, 180 KB copied back, ~30-40
+ * ms in the worker, ~70-90 ms when the query builds the file's index); the inlay hints of the whole file (that program:
+ * ~1800 hints, ~27 ms, ~75 ms with the index build); its inactive ranges, ~2 ms once per compile, then kept with the
+ * index; its expansion sites (that program: 41), ~60-90 ms with the index build, then ~0.2 ms; one expansion, ~0.15 ms
+ * (up to ~15 ms for a large instance printed by hdrgen), round trip ~0.3-0.5 ms more; a module's AST, one hdrgen print
+ * of it at the first request after a compile, then kept by djs (that program: 5.8 MB, 65,000 entries, seconds; ~30 ms
+ * after, the packing of the entries and the copy included); the instances, djs's instance table at the first need after
+ * a compile (that program's 168 own files: ~0.4 s); the imports, one pass over the modules (~30 ms); a completion (that
+ * program, 44-71 items, at load 9), ~50 ms with the index build, then ~2-7 ms, the most for a receiver with UFCS
+ * candidates (`arg.`: 64). A compile with `texts` copies them to the worker on top of its cost (that program with a
+ * one-line edit in a function body, kept from the buffer: ~0.9 s at load 9).
  */
 export class DjsCompiler {
     private worker: Worker | null = null;
@@ -229,7 +228,7 @@ export class DjsCompiler {
      * The members visible after the dot before `position` (line from 0, UTF-16 character) of `file` (absolute), whose
      * editor text is `text`, from the last compile; queued ahead of the calls not yet started (see the class); null
      * when `cancelled` answers true at its turn. See CompletionRequest and CompletionReply. Cost: the file's index at
-     * the first query on it after a compile (labserver.d under -i: ~50 ms in all, at load 9), then ~2-7 ms, the most
+     * the first query on it after a compile (a large program: ~50 ms in all, at load 9), then ~2-7 ms, the most
      * for a receiver with many UFCS candidates.
      */
     completion(file: string, text: string, position: Position, cancelled?: () => boolean)

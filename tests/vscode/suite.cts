@@ -1,6 +1,6 @@
 // The integration test, run inside VS Code's extension host by tests/vscode/run.ts (the `extensionTestsPath`).
 //
-// The workspace is the fixture run.ts writes: `.vscode/settings.json` with a yab-shaped djs.ldc2Line (-Isrc,
+// The workspace is the fixture run.ts writes: `.vscode/settings.json` with a build-tool-shaped djs.ldc2Line (-Isrc,
 // --d-version=Foo, -i and --deps to be dropped) and compile on pause off, src/lib.d, src/app.d with one error after a
 // two-byte character on its line (dmd's byte column 40 is VS Code's character 38).
 // Opening app.d activates the extension; an edit adds a second error and the save compiles. The test checks the
