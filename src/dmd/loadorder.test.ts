@@ -25,19 +25,19 @@
 // so nothing is evaluated before the first entry either. The same verdicts were cross-checked with
 // one vitest worker per entry.
 //
-// NATIVE LEG — the repo's tsconfig emitted by the TypeScript compiler API into a temporary directory
-// (`{"type":"module"}` beside it), then each entry imported in its own `worker_threads` Worker: every
-// Worker owns a separate ESM loader, so each entry starts from an empty registry.
+// NATIVE LEG — the repo's tsconfig emitted by the TypeScript compiler API, in a worker thread, into a
+// temporary directory (`{"type":"module"}` beside it), then each entry imported in its own `worker_threads`
+// Worker: every Worker owns a separate ESM loader, so each entry starts from an empty registry.
 //
 // A red row names the entry module and carries the loader's error; the fix recipe is 01 §4.4
 // (registration slot) / §4.8 (value import last), located with the §4.4 diagnostic recipe.
 
 import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import ts from "typescript";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -115,19 +115,29 @@ describe("single-entry module load (01 §4.8)", () => {
 
 /**
  * Emits every entry with the repo's tsconfig (emit switched on, no source maps) into `outDir`, as `tsc`
- * would for the CLI shim, and marks the directory as ESM. Throws on an emit that was skipped.
+ * would for the CLI shim, and marks the directory as ESM. Rejects on an emit that was skipped. The emit runs in a
+ * worker thread: it is tens of seconds of synchronous work, which on this thread would keep vitest's worker from
+ * reading the reply to its own RPC within vitest's 60 s timeout (tests/setup.ts).
  */
-function emitTree(outDir: string): void {
-    const cfg = ts.getParsedCommandLineOfConfigFile(join(srcRoot, "..", "tsconfig.json"),
-        { noEmit: false, outDir, rootDir: srcRoot, sourceMap: false, declaration: false },
-        { ...ts.sys, onUnRecoverableConfigFileDiagnostic: (d) => { throw new Error(String(d.messageText)); } });
-    if (!cfg)
-        throw new Error("tsconfig.json did not parse");
-    const program = ts.createProgram(entries.map((e) => join(srcRoot, e)), cfg.options);
-    const result = program.emit();
-    if (result.emitSkipped)
-        throw new Error("tsc emit skipped");
-    writeFileSync(join(outDir, "package.json"), '{"type":"module"}\n');
+function emitTree(outDir: string): Promise<void> {
+    const code = `const { parentPort, workerData: d } = require("node:worker_threads");
+const ts = require(d.ts);
+const cfg = ts.getParsedCommandLineOfConfigFile(d.tsconfig,
+    { noEmit: false, outDir: d.outDir, rootDir: d.srcRoot, sourceMap: false, declaration: false },
+    { ...ts.sys, onUnRecoverableConfigFileDiagnostic: (x) => { throw new Error(String(x.messageText)); } });
+if (!cfg)
+    throw new Error("tsconfig.json did not parse");
+if (ts.createProgram(d.roots, cfg.options).emit().emitSkipped)
+    throw new Error("tsc emit skipped");
+parentPort.postMessage("");`;
+    const workerData = { ts: createRequire(import.meta.url).resolve("typescript"), outDir, srcRoot,
+        tsconfig: join(srcRoot, "..", "tsconfig.json"), roots: entries.map((e) => join(srcRoot, e)) };
+    return new Promise<void>((resolve, reject) => {
+        const w = new Worker(code, { eval: true, workerData });
+        w.on("message", () => resolve());
+        w.on("error", reject);
+        w.on("exit", (exit) => reject(new Error(`the emit worker exited with code ${exit} before the emit ended`)));
+    }).then(() => writeFileSync(join(outDir, "package.json"), '{"type":"module"}\n'));
 }
 
 /** Imports `file` as the first module of a fresh Worker's ESM loader; resolves "" on load, else the error. */
@@ -163,7 +173,7 @@ describe("single-entry module load, native Node ESM over the tsc emit", () => {
 
     beforeAll(async () => {
         outDir = realpathSync(mkdtempSync(join(tmpdir(), "djs-loadorder-")));   // the stacks carry real paths
-        emitTree(outDir);
+        await emitTree(outDir);
         const queue = [...entries];
         const lane = async (): Promise<void> => {
             for (let e = queue.shift(); e !== undefined; e = queue.shift())
