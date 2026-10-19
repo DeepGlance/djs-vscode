@@ -13,9 +13,11 @@
 // -disable-linker-strip-dead, the source files and link inputs of the line (the saved file is the one root), and
 // the build tool's `%s` placeholder.
 // ADDED: -c -o- -verrors=0 (the editor-mode contract, 10 §4.7), then the root file.
+// With no line set, `defaultLine` gives one from the folder's layout.
 
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export interface FlagPlan {
     /** The save-time command line without the root file. */
@@ -27,6 +29,17 @@ export interface FlagPlan {
 /** Splits a command line as the build tool's shell does for its lines: whitespace only, no quoting in them. */
 export function splitLine(line: string): string[] {
     return line.split(/\s+/).filter((t) => t !== "");
+}
+
+/**
+ * The line a workspace folder compiles with when `djs.ldc2Line` is empty, as tokens (a folder path may hold spaces):
+ * `ldc2 -i -I<root>`, plus `-I<root>/source` and `-I<root>/src` where those directories exist (dub's layouts), so a
+ * project opened with no setting compiles its own modules against the bundled druntime and Phobos. Planned by
+ * `planFlags` like a written line.
+ */
+export function defaultLine(root: string): string[] {
+    const dirs = [root, ...["source", "src"].map((d) => join(root, d)).filter((d) => existsSync(d))];
+    return ["ldc2", "-i", ...dirs.map((d) => `-I${d}`)];
 }
 
 /** `~` and `~/x` to the home directory; lines write `-J~/dir`. */

@@ -61,7 +61,7 @@
           "type": "string",
           "default": "",
           "scope": "resource",
-          "markdownDescription": "The ldc2 command line your build uses for this repository (for example `ldc2 -i -Isrc -Jviews --vcolumns -mtriple=aarch64-linux-gnu --preview=dip1000 -d-debug`). The compile keeps its compile-defining flags, `-i` included, and drops the build-only ones (`-c`, `-of`, `-L`, `-g`, `--deps`, the inputs)."
+          "markdownDescription": "The ldc2 command line your build uses for this repository (for example `ldc2 -i -Isrc -Jviews --vcolumns -mtriple=aarch64-linux-gnu --preview=dip1000 -d-debug`). The compile keeps its compile-defining flags, `-i` included, and drops the build-only ones (`-c`, `-of`, `-L`, `-g`, `--deps`, the inputs). Empty: the default line `ldc2 -i -I<folder>`, plus `-I<folder>/source` and `-I<folder>/src` where those directories exist (dub's layouts); the status bar then says `default line`."
         },
         "djs.ldcRoot": {
           "type": "string",

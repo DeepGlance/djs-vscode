@@ -47,6 +47,9 @@ tokens, hints and lenses keep their previous state, moved with the edits.
 | `djs.target`   | empty   | The target when `djs.ldc2Line` has no `-mtriple`. Empty: the host's.                   |
 | `djs.ldcRoot`  | empty   | An ldc2 1.43.0 install whose import tree replaces the bundled one. Empty: bundled.     |
 
+With `djs.ldc2Line` empty the extension compiles with `ldc2 -i -I<folder>`, plus `-I<folder>/source` and
+`-I<folder>/src` where those directories exist (dub's layouts), and the status bar says `default line`.
+
 From `djs.ldc2Line` the extension keeps the flags that define the compile (`-I`, `-J`, `-i`, `-mtriple`,
 `-d-version`, `-d-debug`, `-O`, `-release`, `-unittest`, `--preview`, `--revert`, `-P`, `--gcc`, `--vcolumns`,
 `--checkaction`) and drops the build-only ones (`-c`, `-of`, `-L`, `-g`, `--deps`, the source files). A flag djs does

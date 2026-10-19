@@ -5,14 +5,15 @@
 // language-configuration.json, both declared in package.json.
 //
 // A CommonJS entry (VS Code's loader requires extensions); the host modules are ES modules, loaded by dynamic import.
-// Per repository, the setting `djs.ldc2Line` holds the ldc2 command of the repository's target; the command
-// line is planned from it by host/flags.ts (compile-defining flags kept, -i among them, build-only dropped), with the
-// saved or edited file as the one root; the setting `djs.ldcRoot` puts `--djs-ldc=<root>` in front (an ldc2 install's
-// import tree; empty, the default: the tree bundled with djs), and `djs.target` adds `-mtriple=<target>` when the line
-// names none (empty, the default: the host's triple). One compile runs at a time; a save or a pause during a compile
-// queues its file as a root, the queue an ordered set of files (one queued again keeps its place, and a save makes it a
-// save's compile), so no document's latest text is lost to another's. The previous diagnostics stay until the new set
-// arrives.
+// Per repository, the setting `djs.ldc2Line` holds the ldc2 command of the repository's target (empty, the default:
+// `ldc2 -i -I<folder>` plus the folder's `source/` and `src/` where present, host/flags.ts `defaultLine`, the status
+// bar adding `, default line`); the command line is planned from it by host/flags.ts (compile-defining flags kept, -i
+// among them, build-only dropped), with the saved or edited file as the one root; the setting `djs.ldcRoot` puts
+// `--djs-ldc=<root>` in front (an ldc2 install's import tree; empty, the default: the tree bundled with djs), and
+// `djs.target` adds `-mtriple=<target>` when the line names none (empty, the default: the host's triple). One compile
+// runs at a time; a save or a pause during a compile queues its file as a root, the queue an ordered set of files (one
+// queued again keeps its place, and a save makes it a save's compile), so no document's latest text is lost to
+// another's. The previous diagnostics stay until the new set arrives.
 // Compile on pause (settings `djs.compileOnPause`, default on, and `djs.compileOnPauseDelay`, default 300 ms): an edit
 // of the active editor's D document, of a workspace folder, restarts that document's timer, and when it fires the
 // document is queued as a save queues it, nothing written to disk; an edit of another document (a replace in files, a
@@ -286,15 +287,11 @@ function unsavedTexts(): Record<string, string> {
 }
 
 async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, cause: CompileCause): Promise<void> {
-    const line = vscode.workspace.getConfiguration("djs", folder.uri).get<string>("ldc2Line", "").trim();
-    const name = vscode.workspace.asRelativePath(file, false);
-    if (line === "") {
-        status.text = "$(warning) djs: no djs.ldc2Line";
-        status.tooltip = "Set djs.ldc2Line to the ldc2 command line your build uses for this repository.";
-        return;
-    }
-    const plan = host.flags.planFlags(host.flags.splitLine(line), folder.uri.fsPath);
     const config = vscode.workspace.getConfiguration("djs", folder.uri);
+    const line = config.get<string>("ldc2Line", "").trim();
+    const name = vscode.workspace.asRelativePath(file, false);
+    const tokens = line === "" ? host.flags.defaultLine(folder.uri.fsPath) : host.flags.splitLine(line);
+    const plan = host.flags.planFlags(tokens, folder.uri.fsPath);
     const args = [...host.flags.ldcRootArgs(config.get<string>("ldcRoot", ""), folder.uri.fsPath), ...plan.args,
         ...host.flags.targetArgs(config.get<string>("target", ""), plan.args), file.fsPath];
     const texts = unsavedTexts();
@@ -336,17 +333,21 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     const secs = (reply.wallMs / 1000).toFixed(1);
     const source = reply.fromBuffer.includes(file.fsPath) ? "buffer" : "disk";
     const fresh = reply.mode === "fresh" ? ", fresh" : "";
+    const defaulted = line === "" ? ", default line" : "";
     if (reply.status === 0) {
         const errors = `${reply.errors} error${reply.errors === 1 ? "" : "s"} `;
         status.text = `${reply.errors === 0 ? "$(check)" : "$(error)"} djs: ${name} ${reply.errors === 0 ? "" : errors}`
-            + `${secs} s, ${source}${fresh}`;
+            + `${secs} s, ${source}${fresh}${defaulted}`;
     } else {
-        status.text = (reply.status === 2 ? "$(error) djs: unsupported flag" : "$(error) djs: internal error") + fresh;
+        status.text = (reply.status === 2 ? "$(error) djs: unsupported flag" : "$(error) djs: internal error") + fresh
+            + defaulted;
         channel.show(true);
     }
     const why = reply.mode === "fresh" ? `Fresh compile: ${reply.reason}` : "";
     const from = buffers.length > 0 ? `Unsaved buffers, read in place of the disk: ${buffers.join(", ")}` : "";
-    status.tooltip = [why, from, reply.output.slice(0, 2000)].filter((t) => t !== "").join("\n\n") || undefined;
+    const how = defaulted ? `No djs.ldc2Line: the default line, ${tokens.join(" ")}. Set djs.ldc2Line to the ldc2 `
+        + "command line your build uses for this repository." : "";
+    status.tooltip = [why, from, how, reply.output.slice(0, 2000)].filter((t) => t !== "").join("\n\n") || undefined;
     // the AST views and the instances explorer show WORKER_DIED since a death: the first compile after it, a pause's
     // too, refreshes them as a save's does
     const afterDeath = deadAt === generation;
@@ -427,10 +428,10 @@ function onChange(e: vscode.TextDocumentChangeEvent): void {
 }
 
 /**
- * A saved D file compiles with its workspace folder's `djs.ldc2Line`; its pause timer stops, the save compiling the
- * same text. A file in no folder (a Phobos module opened from the LDC tree) has no command line to compile with: the
- * status bar and the output channel say so, rather than borrowing another folder's flags, whose diagnostics would
- * describe a build that does not exist.
+ * A saved D file compiles with its workspace folder's `djs.ldc2Line`, or the default line when it is empty; its pause
+ * timer stops, the save compiling the same text. A file in no folder (a Phobos module opened from the LDC tree) has no
+ * command line to compile with: the status bar and the output channel say so, rather than borrowing another folder's
+ * flags, whose diagnostics would describe a build that does not exist.
  */
 function onSave(doc: vscode.TextDocument): void {
     if (!isD(doc))

@@ -127,6 +127,13 @@ describe("the public fixture", () => {
         const back = await c.compile(args);
         expect([back.mode, back.errors]).toEqual(["kept", 0]);
     });
+
+    test("the default line, no djs.ldc2Line: the folder and its src/ on the import path, geom found", async () => {
+        const flags = await import(new URL("host/flags.js", DIST).href) as typeof import("./flags.js");
+        const r = await c.compile([...flags.planFlags(flags.defaultLine(REPO), REPO).args, APP]);
+        expect([r.status, r.errors, r.mode], r.output).toEqual([0, 0, "fresh"]);
+        expect((await c.definition(APP, ...pos(at(app, "Vec!int"), 1), app))!.result!.file).toBe(GEOM);
+    });
 });
 
 /** A position as the query methods' (line, character) arguments, `skip` characters further. */

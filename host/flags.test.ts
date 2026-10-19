@@ -1,8 +1,10 @@
 // Tests for host/flags.ts on the ldc2 lines a build tool writes.
 
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { ldcRootArgs, planFlags, splitLine, targetArgs } from "./flags.js";
+import { defaultLine, ldcRootArgs, planFlags, splitLine, targetArgs } from "./flags.js";
 
 const ROOT = "/work/app";
 const HOME = homedir();
@@ -65,5 +67,22 @@ describe("targetArgs — the setting djs.target", () => {
         expect(targetArgs("x86_64-linux-gnu", ["-mtriple=aarch64-linux-gnu", ...EDITOR])).toEqual([]);
         expect(targetArgs("x86_64-linux-gnu", ["-mtriple", "aarch64-linux-gnu", ...EDITOR])).toEqual([]);
         expect(targetArgs("", EDITOR)).toEqual([]);
+    });
+});
+
+describe("defaultLine — the setting djs.ldc2Line empty", () => {
+    test("the folder, then its source/ and src/ where they exist; a path with a space stays one token", () => {
+        const root = mkdtempSync(join(tmpdir(), "djs default "));
+        try {
+            expect(defaultLine(root)).toEqual(["ldc2", "-i", `-I${root}`]);
+            expect(planFlags(defaultLine(root), root).args).toEqual(["-i", `-I${root}`, ...EDITOR]);
+            mkdirSync(join(root, "src"));
+            expect(defaultLine(root)).toEqual(["ldc2", "-i", `-I${root}`, `-I${root}/src`]);
+            mkdirSync(join(root, "source"));
+            expect(planFlags(defaultLine(root), root).args).toEqual(
+                ["-i", `-I${root}`, `-I${root}/source`, `-I${root}/src`, ...EDITOR]);
+        } finally {
+            rmSync(root, { recursive: true });
+        }
     });
 });
