@@ -35,6 +35,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainThread } from "node:worker_threads";
 import { CHECKACTION, CHECKENABLE } from "./dmd/astenums.js";
 import { Compiler, includeModulePatterns, resetCompilerState, setIncludeImports } from "./dmd/compiler.js";
 import { DebugCondition, VersionCondition } from "./dmd/cond.js";
@@ -1241,10 +1242,14 @@ export function djsMain(args: readonly string[], onFatal: FatalErrorHandler = th
     }
 }
 
-/** True when this module is the process entry (`node djs.js ...`), not an import. */
+/**
+ * True when this module is the process entry (`node djs.js ...`), not an import. Never in a worker thread: there
+ * `process.argv[1]` is the worker's script, which is this module's file when a bundler inlines djs into it (the VS Code
+ * extension's worker.js), and a match would run the CLI with no arguments.
+ */
 function isProcessEntry(): boolean {
     const script = process.argv[1];
-    if (script === undefined)
+    if (!isMainThread || script === undefined)
         return false;
     try {
         return import.meta.url === pathToFileURL(realpathSync(script)).href;
