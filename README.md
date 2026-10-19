@@ -5,17 +5,56 @@ is the frontend of LDC 1.43.0 (DMD 2.113) ported to TypeScript; this extension r
 Code, so diagnostics, hovers, references and completions are the compiler's, for the flags and the target of your
 build, with no D toolchain installed.
 
-**Preview.** 0.1.0 is the first release.
+**Preview.** 0.1.0 is the first release: expect rough edges, and report them.
 
-## Features
+![An error typed, a hover, a completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/demo.gif)
 
-Diagnostics on save and after a pause in typing, exactly as ldc2 reports them; hover with what the compiler made of
-the code (lowered operators, UFCS, `alias this`, the overload picked); go to definition; outline; find all references
-and rename; signature help; completion after a dot and of the names in scope; semantic highlighting over code-d's
-TextMate grammar; inlay hints; the `version`/`debug`/`static if` branches your target does not compile, dimmed; peeks
-at string mixins, template instances and folded values; the module's AST as `-vcg-ast` prints it; explorers for
-template instances and the import graph. Everything answers from the last compile. The extension's page, with the
-settings, the targets and the limits, is [`extension/README.md`](extension/README.md).
+## Install
+
+From the Extensions view (search `djs`) or with `code --install-extension deepglance.djs-dlang`, then open a folder
+and a D file: no setting is needed.
+
+## What it does
+
+![A diagnostic on unsaved text](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/diagnostic.png)
+
+*A diagnostic on unsaved text*: errors, warnings and deprecations when a file is opened, on save and after a pause in
+typing, exactly as ldc2 reports them.
+
+![A hover with the UFCS call resolved](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/hover.png)
+
+*A hover with the UFCS call resolved*: kind, signature, doc comment, and what the compiler made of the code (lowered
+operators, UFCS, `alias this`, the overload picked, implicit conversions).
+
+![Completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/completion.png)
+
+*Completion after a dot*: members, UFCS candidates and built-in properties; while a name is typed, the names in scope.
+
+![The AST view beside the source](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/ast.png)
+
+*The AST view beside the source*: the module as `-vcg-ast` prints it, with navigation back to the source.
+
+And without a picture:
+
+- **Go to definition** from any identifier the compile resolved.
+- **Find all references** through UFCS, property calls, template instances and folded constants.
+- **Rename** over those references, refused with the reason where a use could be missed.
+- **Outline**, breadcrumbs and Go to Symbol from the compiled declarations, string-mixin declarations included.
+- **Signature help** with the overload the compiler picked first and the argument under the cursor.
+- **Inlay hints**: inferred types, parameter names at call sites, a template's instance count.
+- **Inactive branches dimmed**: the `version`, `debug` and `static if` branches your target and flags do not compile.
+- **Semantic highlighting** over code-d's TextMate grammar.
+- **Expansion peeks** of string mixins, template instances and folded values; **explorers** of template instances and
+  of the import graph.
+- **Three targets**: arm64 macOS (`arm64-apple-macos15`), `aarch64-linux-gnu` and `x86_64-linux-gnu`; the host's by
+  default, another from `-mtriple` in your ldc2 line or the `djs.target` setting.
+- **Zero config**: with no setting, the default line `ldc2 -i -I<folder>` plus the folder's `source/` and `src/`
+  (dub's layouts); your build's ldc2 command line goes in `djs.ldc2Line`.
+- **Restricted Mode**: in an untrusted folder everything works with the default line and the bundled import tree; the
+  folder's `djs.ldc2Line` and `djs.ldcRoot` wait for trust.
+
+Everything answers from the last compile. The settings, the targets and the limits (memory, fresh compiles, completion
+one compile behind) are on the extension's page, [`extension/README.md`](extension/README.md).
 
 ## Requirements
 
@@ -33,14 +72,12 @@ npm run build                  # dist/: the compiler, the worker, the extension
 npx tsc -p host/tsconfig.json  # type-checks the host and the integration test
 npm run test:host              # the worker and the queries on the fixture in host/fixture/
 npm test                       # the compiler's own suite
-DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-<version>.vsix
+DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-dlang-<version>.vsix
 ```
 
-The published extension installs from the Extensions view (search `djs`) or with
-`code --install-extension deepglance.djs`. Install a `.vsix` with **Extensions: Install from VSIX...**, or
-`code --install-extension <file>.vsix`. `DJS_VSCODE_SCRATCH=<dir> npm run test:vscode` runs the integration tests in
-an installed VS Code (the fixture trusted, then untrusted), with a user-data and extensions directory of its own under
-`<dir>`.
+Install a `.vsix` with **Extensions: Install from VSIX...**, or `code --install-extension <file>.vsix`.
+`DJS_VSCODE_SCRATCH=<dir> npm run test:vscode` runs the integration tests in an installed VS Code (the fixture trusted,
+then untrusted), with a user-data and extensions directory of its own under `<dir>`.
 
 ## Repository layout
 

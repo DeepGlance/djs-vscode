@@ -10,7 +10,7 @@ the compiler's own, for the flags and target of your build, with no D toolchain 
 
 ## Getting started
 
-Install it from the Extensions view (search `djs`) or with `code --install-extension deepglance.djs`, then open a
+Install it from the Extensions view (search `djs`) or with `code --install-extension deepglance.djs-dlang`, then open a
 folder and a D file: no setting is needed. With `djs.ldc2Line` empty the extension compiles with `ldc2 -i -I<folder>`,
 plus the folder's `source/` and `src/` where they exist, so a dub layout works as it is; for anything else, put your
 build's ldc2 command line in `djs.ldc2Line` (see [Settings](#settings)).
