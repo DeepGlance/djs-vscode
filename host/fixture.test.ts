@@ -4,6 +4,7 @@
 // writes nothing (`-o-`), and the diagnostics case gives the edited text as a buffer, never on disk.
 
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { DjsCompiler as Compiler } from "./compiler.js";
@@ -61,7 +62,7 @@ describe("the public fixture", () => {
         const ufcs = (await c.hover(APP, ...pos(at(app, "length2"), 2), app))!;
         expect(ufcs.result!.markdown).toMatch(/UFCS:/);
         const plus = (await c.hover(APP, ...pos(at(app, "a + Vec"), 2), app))!;
-        expect(plus.result!.markdown).toMatch(/Lowered:[\s\S]*opBinary/);
+        expect(plus.result!.markdown).toMatch(/Lowered:[\s\S]*opBinary[\s\S]*Componentwise sum\./);
     });
 
     test("go to definition across modules", async () => {
@@ -114,6 +115,71 @@ describe("the public fixture", () => {
         const imp = (await c.imports())!;
         const kind = (name: string): string | undefined => imp.modules!.find((m) => m.name === name)?.kind;
         expect([kind("app"), kind("geom"), kind("object")]).toEqual(["root", "included", "imported"]);
+        // the compile at open compares these files, resolved, with the editor's paths
+        const file = (name: string): string => resolve(imp.modules!.find((m) => m.name === name)!.file);
+        expect([file("app"), file("geom")]).toEqual([APP, GEOM]);
+    });
+
+    test("the outline: the chosen branch, a mixin's declaration, a template's members", async () => {
+        const r = (await c.documentSymbols(APP, app))!;
+        expect(r.symbols!.map((s) => `${s.kind} ${s.name}`)).toEqual(["module app", "namespace imports",
+            "constant side", "variable generated", "constant target", "function scale", "function main"]);
+        expect(r.symbols![3]!.detail).toBe("(mixin) int");
+        const g = (await c.documentSymbols(GEOM, geom))!;
+        const vec = g.symbols!.find((s) => s.name === "Vec")!;
+        expect([vec.kind, vec.detail, vec.children.map((s) => `${s.kind} ${s.name}`)]).toEqual(
+            ["struct", "(T)", ["field x", "field y", "method opBinary"]]);
+        const stale = (await c.documentSymbols(APP, `${app}\n`))!;
+        expect([stale.symbols, stale.stale]).toEqual([null, true]);
+    });
+
+    test("references across modules: a function template through UFCS, a member through `alias this`", async () => {
+        const where = (r: { file: string; range: Range; declaration: boolean }): string =>
+            `${r.file === APP ? "app" : r.file === GEOM ? "geom" : r.file}:${r.range.start.line}:`
+            + `${r.range.start.character}${r.declaration ? "*" : ""}`;
+        const site = (file: string, p: Position, declaration = false): string =>
+            `${file}:${p.line}:${p.character}${declaration ? "*" : ""}`;
+        const l = (await c.references(APP, ...pos(at(app, "b.length2"), 2), app))!;
+        expect(l.result!.references.map(where)).toEqual([site("app", at(app, "length2")),
+            site("geom", at(geom, "length2"), true)]);
+        const x = (await c.references(GEOM, ...pos(at(geom, "x, y")), geom))!;
+        const sites = x.result!.references.map(where);
+        expect(sites).toContain(site("app", at(app, "n.x", 0, 2)));
+        expect(sites).toContain(site("geom", at(geom, "x, y"), true));
+    });
+
+    test("rename: a function template through UFCS, a member, a template parameter; the edits compile clean",
+        async () => {
+            const texts: Record<string, string> = { [APP]: app, [GEOM]: geom };
+            const steps: [string, string, string, number][] = [
+                [GEOM, "T length2", "E", 0], [APP, "b.length2", "lengthSquared", 2], [GEOM, "x, y", "first", 0]];
+            for (const [file, token, newName, skip] of steps) {
+                const p = at(texts[file]!, token, 0, skip);
+                const prepared = (await c.rename(file, p.line, p.character, texts[file]!))!;
+                expect(prepared.result?.placeholder, prepared.reason).toBe(token.slice(skip).split(/[ ,.]/)[0]);
+                const r = (await c.rename(file, p.line, p.character, texts[file]!, newName))!;
+                expect(r.result, r.reason).not.toBeNull();
+                for (const f of [APP, GEOM])
+                    texts[f] = applyEdits(texts[f]!, r.result!.edits.filter((e) => e.file === f), newName);
+                const compiled = await c.compile(args, texts);
+                expect([compiled.errors, compiled.output], `${token} -> ${newName}`).toEqual([0, ""]);
+            }
+            expect(texts[APP]).toContain("b.lengthSquared");
+            expect(texts[GEOM]).toContain("E lengthSquared(E)(Vec!E v)");
+            const refused = (await c.rename(APP, ...pos(at(app, "scale(b")), app, "main"))!;
+            expect(refused.result).toBeNull();
+            expect((await c.compile(args)).errors).toBe(0);
+        });
+
+    test("signature help: the argument under the cursor, the doc summary; outside a call, nothing", async () => {
+        const p = at(app, "scale(b.length2, side)", 0, 17);
+        const r = (await c.signatureHelp(APP, p.line, p.character, app))!;
+        const sig = r.result!.signatures[r.result!.activeSignature]!;
+        expect([sig.label, sig.label.slice(...sig.parameters[r.result!.activeParameter]!), sig.documentation])
+            .toEqual(["int scale(int value, int factor)", "int factor", "`value` times `factor`."]);
+        const out = at(app, "int main()");
+        expect((await c.signatureHelp(APP, out.line, out.character, app))!.reason)
+            .toBe("not inside a call's parentheses");
     });
 
     test("diagnostics from a buffer, then the disk text kept", async () => {
@@ -135,6 +201,17 @@ describe("the public fixture", () => {
         expect((await c.definition(APP, ...pos(at(app, "Vec!int"), 1), app))!.result!.file).toBe(GEOM);
     });
 });
+
+/** `text` with each edit's range replaced by `newName`. */
+function applyEdits(text: string, edits: readonly { range: Range }[], newName: string): string {
+    const lines = text.split("\n");
+    for (const e of [...edits].sort((a, b) => b.range.start.line - a.range.start.line
+        || b.range.start.character - a.range.start.character)) {
+        const l = lines[e.range.start.line]!;
+        lines[e.range.start.line] = l.slice(0, e.range.start.character) + newName + l.slice(e.range.end.character);
+    }
+    return lines.join("\n");
+}
 
 /** A position as the query methods' (line, character) arguments, `skip` characters further. */
 function pos(p: Position, skip = 0): [number, number] {

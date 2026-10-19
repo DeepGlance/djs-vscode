@@ -10,12 +10,12 @@ build, with no D toolchain installed.
 ## Features
 
 Diagnostics on save and after a pause in typing, exactly as ldc2 reports them; hover with what the compiler made of
-the code (lowered operators, UFCS, `alias this`, the overload picked); go to definition; outline; find all
-references and rename; signature help; completion after a dot; semantic highlighting over code-d's TextMate grammar;
-inlay hints; the `version`/`debug`/`static if` branches your target does not compile, dimmed; peeks at string mixins,
-template instances and folded values; the module's AST as `-vcg-ast` prints it; explorers for template instances and
-the import graph. Everything answers from the last compile. The extension's page, with the settings, the targets and
-the limits, is [`extension/README.md`](extension/README.md).
+the code (lowered operators, UFCS, `alias this`, the overload picked); go to definition; outline; find all references
+and rename; signature help; completion after a dot and of the names in scope; semantic highlighting over code-d's
+TextMate grammar; inlay hints; the `version`/`debug`/`static if` branches your target does not compile, dimmed; peeks
+at string mixins, template instances and folded values; the module's AST as `-vcg-ast` prints it; explorers for
+template instances and the import graph. Everything answers from the last compile. The extension's page, with the
+settings, the targets and the limits, is [`extension/README.md`](extension/README.md).
 
 ## Requirements
 
@@ -36,9 +36,11 @@ npm test                       # the compiler's own suite
 DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-<version>.vsix
 ```
 
-Install the `.vsix` with **Extensions: Install from VSIX...**, or `code --install-extension <file>.vsix`.
-`DJS_VSCODE_SCRATCH=<dir> npm run test:vscode` runs the integration test in an installed VS Code, with a user-data and
-extensions directory of its own under `<dir>`.
+The published extension installs from the Extensions view (search `djs`) or with
+`code --install-extension deepglance.djs`. Install a `.vsix` with **Extensions: Install from VSIX...**, or
+`code --install-extension <file>.vsix`. `DJS_VSCODE_SCRATCH=<dir> npm run test:vscode` runs the integration tests in
+an installed VS Code (the fixture trusted, then untrusted), with a user-data and extensions directory of its own under
+`<dir>`.
 
 ## Repository layout
 

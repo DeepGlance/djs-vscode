@@ -6,16 +6,38 @@ the compiler's own, for the flags and target of your build, with no D toolchain 
 
 **Preview.** Version 0.1.0 is the first release: expect rough edges, and report them.
 
+![An error typed, a hover, a completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/demo.gif)
+
+## Getting started
+
+Install it from the Extensions view (search `djs`) or with `code --install-extension deepglance.djs`, then open a
+folder and a D file: no setting is needed. With `djs.ldc2Line` empty the extension compiles with `ldc2 -i -I<folder>`,
+plus the folder's `source/` and `src/` where they exist, so a dub layout works as it is; for anything else, put your
+build's ldc2 command line in `djs.ldc2Line` (see [Settings](#settings)).
+
 ## What it does
 
-- **Diagnostics** on save and after a pause in typing (300 ms by default), from the unsaved text of every open D
-  file: errors, warnings, deprecations and their supplemental lines, exactly as ldc2 reports them.
+- **Diagnostics** when a file is opened, on save and after a pause in typing (300 ms by default), from the unsaved
+  text of every open D file: errors, warnings, deprecations and their supplemental lines, exactly as ldc2 reports
+  them.
 - **Hover**: kind, signature or type, the template instance, deprecation, the doc comment; and what the compiler
   made of the code under the cursor: an operator lowered to `opBinary`, a UFCS call, a property call, a call
   through `alias this`, the overload picked among the candidates, an implicit conversion.
 - **Go to definition**, from any identifier the compile resolved.
-- **Completion** after a dot: members, then UFCS candidates, then built-in properties, with signature and doc
-  summary.
+- **Outline**: the outline view, breadcrumbs and Go to Symbol in Editor, from the compiled declarations: aggregates
+  and templates with their members, nested functions, the `version` and `static if` branches your target compiles,
+  string-mixin declarations marked `(mixin)`.
+- **Find all references**: every use the compile resolved to the symbol, in the files it analysed (with `-i`, your
+  modules), through UFCS, property calls, template instances and folded constants. Not found: uses in modules the
+  compile only imports, in branches not compiled, and names spelled inside a string mixin's text.
+- **Rename** over those references. Refused, with the reason, where a use could be missed: a name declared in a
+  module the compile only imports (Phobos, druntime), a special function, a name D calls implicitly (`opBinary`,
+  `front`, `empty`, `toString`, ...), a name a string mixin spells; and a new name the scope already declares.
+- **Signature help** on `(` and `,`: the overload the compiler picked first, then the others, the argument under the
+  cursor highlighted, with the doc summary; a template's instance with its types substituted.
+- **Completion** after a dot: members, then UFCS candidates, then built-in properties; while a name is typed, or on
+  request, the names in scope: locals and parameters, the enclosing type's members, the module's, the imported
+  modules'. Each with signature and doc summary.
 - **Semantic highlighting**: each identifier coloured by what it names (type, function, variable, parameter,
   member, enum member, namespace; `readonly`, `static`, `deprecated`), over the TextMate grammar.
 - **Inlay hints**: the inferred type of `auto` variables and inferred return types, parameter names at call sites,
@@ -30,6 +52,14 @@ the compiler's own, for the flags and target of your build, with no D toolchain 
 
 Every feature answers from the last compile. While a file has edits not yet compiled, the hover says so and the
 tokens, hints and lenses keep their previous state, moved with the edits.
+
+![A diagnostic on unsaved text](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/diagnostic.png)
+
+![A hover with the UFCS call resolved](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/hover.png)
+
+![Completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/completion.png)
+
+![The AST view beside the source](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/ast.png)
 
 ## Requirements
 
@@ -59,6 +89,13 @@ The other settings switch single features on and off: `djs.compileOnPause` and `
 `djs.semanticTokens`, `djs.inlayHints.types`, `.parameterNames`, `.instanceCounts`, `djs.dimInactiveCode` and
 `djs.inactiveCodeOpacity`, `djs.expansionLenses`.
 
+## Restricted Mode
+
+In a folder you have not trusted the extension runs with limited support: the grammar, the diagnostics, the hovers
+and the other features that read the code work, compiled with the default line and the bundled import tree. The
+folder's `djs.ldc2Line` and `djs.ldcRoot`, which name a command line and a path, are ignored until you trust it; the
+status bar then says `restricted`. Trusting the folder compiles the open files again with its settings.
+
 ## Targets
 
 | Target                                                        | How                                     |
@@ -87,7 +124,11 @@ without it. To use djs alone in a workspace: Extensions view, code-d, **Disable 
 - **A half-typed line**: a compile of a file with a syntax error, after a good one, may report a deprecation a
   compile from scratch would not, and leave some symbols analysed that it would skip. It clears at the next
   compile without the syntax error.
-- **Completion** works after a dot only; it answers from the last compile, one compile behind the text.
+- **Completion** answers from the last compile, one compile behind the text: a local declared since is offered after
+  the next compile. After a dot it lists the compiler-generated `_init` first.
+- **Large codebases**: on some (the DMD frontend in LDC's sources, for one) the kept engine does not keep, and every
+  compile is fresh, 2-3 s.
+- **`djs.ldc2Line`** also accepts ldmd2's spellings, `-version=X` among them, which ldc2 itself refuses.
 - **No codegen**: djs is a frontend. It does not build, run or debug programs; keep your build tool for that.
 
 ## Licence

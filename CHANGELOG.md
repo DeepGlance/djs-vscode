@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `-H`, `-Hd`, `-Hf`, `-Hkeep-all-bodies` (`.di` headers), `-mixin=` and `-deps[=<file>]` (also `--deps`): the
+  frontend's own outputs, written as ldc2 writes them. `-edition[=NNNN[<file>]]`, `-noasm`; `-nogc` accepted (it acts
+  only in code generation).
+- `-mcpu=` (`native` on an M2, the Apple M1-M5, Cortex-A53/A72/A76/A78AE, the x86-64 levels; `avx`, `avx2`):
+  `__traits(targetCPU)`, `__traits(targetHasFeature)`, `D_AVX`/`D_AVX2` and ldc2's warnings, as ldc2 gives them.
+- The kept-module engine drops, at the next compile, a unit that skipped analysis because errors were already
+  reported (a copy constructor not looked for, a `__traits` type not reported, a struct's `isPOD` answer cached).
+- The kept-module engine keeps a save that adds or drops an import whose analysis leaves symbols deferred (`std.json`),
+  where it compiled fresh: a kept unit that retries the deferred symbols without work replays under others.
+- The emitted JavaScript carries no comments: a smaller module graph to load at every start.
+
 ## 0.1.0 (preview) — LDC 1.43.0 baseline
 
 The frontend of LDC 1.43.0 in TypeScript: lexer, parser, semantic analysis, CTFE, ImportC, Ddoc, the JSON output

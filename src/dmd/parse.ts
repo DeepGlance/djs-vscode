@@ -7813,66 +7813,8 @@ export class Parser extends Lexer {
           this.nextToken();
           break Body;
 
-        case TOK.float32Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.tfloat32);
-          this.nextToken();
-          break Body;
-
-        case TOK.float64Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.tfloat64);
-          this.nextToken();
-          break Body;
-
-        case TOK.float80Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.tfloat80);
-          this.nextToken();
-          break Body;
-
-        case TOK.imaginary32Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.timaginary32);
-          this.nextToken();
-          break Body;
-
-        case TOK.imaginary64Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.timaginary64);
-          this.nextToken();
-          break Body;
-
-        case TOK.imaginary80Literal:
-          e = new RealExp(loc, this.token.floatvalue, Type.timaginary80);
-          this.nextToken();
-          break Body;
-
         case TOK.null_:
           e = new NullExp(loc);
-          this.nextToken();
-          break Body;
-
-        case TOK.file:
-          e = new FileInitExp(loc, EXP.file);
-          this.nextToken();
-          break Body;
-        case TOK.fileFullPath:
-          e = new FileInitExp(loc, EXP.fileFullPath);
-          this.nextToken();
-          break Body;
-
-        case TOK.line:
-          e = new LineInitExp(loc);
-          this.nextToken();
-          break Body;
-
-        case TOK.moduleString:
-          e = new ModuleInitExp(loc);
-          this.nextToken();
-          break Body;
-        case TOK.functionString:
-          e = new FuncInitExp(loc);
-          this.nextToken();
-          break Body;
-
-        case TOK.prettyFunction:
-          e = new PrettyFuncInitExp(loc);
           this.nextToken();
           break Body;
 
@@ -7888,21 +7830,6 @@ export class Parser extends Lexer {
 
         case TOK.charLiteral:
           e = new IntegerExp(loc, this.token.unsvalue, Type.tchar);
-          this.nextToken();
-          break Body;
-
-        case TOK.wcharLiteral:
-          e = new IntegerExp(loc, this.token.unsvalue, Type.twchar);
-          this.nextToken();
-          break Body;
-
-        case TOK.dcharLiteral:
-          e = new IntegerExp(loc, this.token.unsvalue, Type.tdchar);
-          this.nextToken();
-          break Body;
-
-        case TOK.interpolated:
-          e = new InterpExp(loc, this.token.interpolatedSet, this.token.postfix);
           this.nextToken();
           break Body;
 
@@ -7953,278 +7880,8 @@ export class Parser extends Lexer {
             break Body;
           }
         }
-        case TOK.void_:
-          t = Type.tvoid;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.int8:
-          t = Type.tint8;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.uns8:
-          t = Type.tuns8;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.int16:
-          t = Type.tint16;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.uns16:
-          t = Type.tuns16;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.int32:
-          t = Type.tint32;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.uns32:
-          t = Type.tuns32;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.int64:
-          t = Type.tint64;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.uns64:
-          t = Type.tuns64;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.int128:
-          t = Type.tint128;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.uns128:
-          t = Type.tuns128;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.float32:
-          t = Type.tfloat32;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.float64:
-          t = Type.tfloat64;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.float80:
-          t = Type.tfloat80;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.imaginary32:
-          t = Type.timaginary32;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.imaginary64:
-          t = Type.timaginary64;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.imaginary80:
-          t = Type.timaginary80;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.complex32:
-          t = Type.tcomplex32;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.complex64:
-          t = Type.tcomplex64;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.complex80:
-          t = Type.tcomplex80;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.bool_:
-          t = Type.tbool;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.char_:
-          t = Type.tchar;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.wchar_:
-          t = Type.twchar;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-        case TOK.dchar_:
-          t = Type.tdchar;
-          {
-            const ex = this.parsePrimaryExp_LabelX(loc, t);
-            if (ex === null) {
-              jumpLerr = true;
-              break Body;
-            }
-            e = ex;
-          }
-          break Body;
-
         case TOK.typeof_: {
           t = this.parseTypeof();
-          e = new TypeExp(loc, t);
-          break Body;
-        }
-        case TOK.vector: {
-          t = this.parseVector();
           e = new TypeExp(loc, t);
           break Body;
         }
@@ -8234,14 +7891,6 @@ export class Parser extends Lexer {
           const o = this.parseTypeOrAssignExp();
           this.check(TOK.rightParenthesis);
           e = new TypeidExp(loc, o);
-          break Body;
-        }
-        case TOK.rvalue: {
-          this.nextToken();
-          this.checkFollowing(TOK.leftParenthesis, ds("`__rvalue`"));
-          e = this.parseAssignExp();
-          e.rvalue = true;
-          this.check(TOK.rightParenthesis);
           break Body;
         }
         case TOK.traits: {
@@ -8453,10 +8102,16 @@ export class Parser extends Lexer {
           jumpDelegate = true;
           break Body;
 
-        default:
-          this.error(ds("expression expected, not `%s`"), this.token.toChars());
-          jumpLerr = true;
+        default: {
+          // the rare primaries and the error (parsePrimaryExpRare, WHY there)
+          const ex = this.parsePrimaryExpRare(loc);
+          if (ex === null) {
+            jumpLerr = true;
+            break Body;
+          }
+          e = ex;
           break Body;
+        }
       }
     }
 
@@ -8472,7 +8127,190 @@ export class Parser extends Lexer {
     return e!;
   }
 
-  /* The `LabelX:` body of parsePrimaryExp for the basic-type primaries (parse.d:8431-8454).
+  /* The cases of parsePrimaryExp's switch that most modules never reach, and its `default:`
+   * (parse.d:8231-8260, 8266-8293, 8309-8323, 8364-8483 with `LabelX:`, 8490-8495, 8505-8513, 8748):
+   * the floating and imaginary literals, the special keywords (`__FILE__` ... `__PRETTY_FUNCTION__`),
+   * wchar/dchar/interpolated literals, the basic-type primaries, `__vector` and `__rvalue`. Returns
+   * the parsed expression, or null to signal `goto Lerr`.
+   *
+   * WHY a method and not cases of parsePrimaryExp (D has them inline): V8 deoptimizes a compiled
+   * function the first time it reaches a property access, `new` or compare that had not run before
+   * it was compiled, and compiles it again once it is hot; the case labels of a switch on `TOK.x`
+   * are such compares, one per label, tried in order. parsePrimaryExp is one of the largest
+   * TurboFan compiles of the frontend, and the first of these forms reached after it was compiled
+   * (`__FUNCTION__` in core.lifetime, every process) made V8 compile it again. Now its switch ends
+   * at one warm `default:` call, and a first use recompiles only this method. */
+  private parsePrimaryExpRare(loc: Loc): Expression | null {
+    let e: Expression;
+    let t: Type;
+    switch ((this.token.value as TOK)) {
+      case TOK.float32Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.tfloat32);
+        this.nextToken();
+        return e;
+
+      case TOK.float64Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.tfloat64);
+        this.nextToken();
+        return e;
+
+      case TOK.float80Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.tfloat80);
+        this.nextToken();
+        return e;
+
+      case TOK.imaginary32Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.timaginary32);
+        this.nextToken();
+        return e;
+
+      case TOK.imaginary64Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.timaginary64);
+        this.nextToken();
+        return e;
+
+      case TOK.imaginary80Literal:
+        e = new RealExp(loc, this.token.floatvalue, Type.timaginary80);
+        this.nextToken();
+        return e;
+
+      case TOK.file:
+        e = new FileInitExp(loc, EXP.file);
+        this.nextToken();
+        return e;
+      case TOK.fileFullPath:
+        e = new FileInitExp(loc, EXP.fileFullPath);
+        this.nextToken();
+        return e;
+
+      case TOK.line:
+        e = new LineInitExp(loc);
+        this.nextToken();
+        return e;
+
+      case TOK.moduleString:
+        e = new ModuleInitExp(loc);
+        this.nextToken();
+        return e;
+      case TOK.functionString:
+        e = new FuncInitExp(loc);
+        this.nextToken();
+        return e;
+
+      case TOK.prettyFunction:
+        e = new PrettyFuncInitExp(loc);
+        this.nextToken();
+        return e;
+
+      case TOK.wcharLiteral:
+        e = new IntegerExp(loc, this.token.unsvalue, Type.twchar);
+        this.nextToken();
+        return e;
+
+      case TOK.dcharLiteral:
+        e = new IntegerExp(loc, this.token.unsvalue, Type.tdchar);
+        this.nextToken();
+        return e;
+
+      case TOK.interpolated:
+        e = new InterpExp(loc, this.token.interpolatedSet, this.token.postfix);
+        this.nextToken();
+        return e;
+
+      case TOK.void_:
+        t = Type.tvoid;
+        break; // goto LabelX
+      case TOK.int8:
+        t = Type.tint8;
+        break; // goto LabelX
+      case TOK.uns8:
+        t = Type.tuns8;
+        break; // goto LabelX
+      case TOK.int16:
+        t = Type.tint16;
+        break; // goto LabelX
+      case TOK.uns16:
+        t = Type.tuns16;
+        break; // goto LabelX
+      case TOK.int32:
+        t = Type.tint32;
+        break; // goto LabelX
+      case TOK.uns32:
+        t = Type.tuns32;
+        break; // goto LabelX
+      case TOK.int64:
+        t = Type.tint64;
+        break; // goto LabelX
+      case TOK.uns64:
+        t = Type.tuns64;
+        break; // goto LabelX
+      case TOK.int128:
+        t = Type.tint128;
+        break; // goto LabelX
+      case TOK.uns128:
+        t = Type.tuns128;
+        break; // goto LabelX
+      case TOK.float32:
+        t = Type.tfloat32;
+        break; // goto LabelX
+      case TOK.float64:
+        t = Type.tfloat64;
+        break; // goto LabelX
+      case TOK.float80:
+        t = Type.tfloat80;
+        break; // goto LabelX
+      case TOK.imaginary32:
+        t = Type.timaginary32;
+        break; // goto LabelX
+      case TOK.imaginary64:
+        t = Type.timaginary64;
+        break; // goto LabelX
+      case TOK.imaginary80:
+        t = Type.timaginary80;
+        break; // goto LabelX
+      case TOK.complex32:
+        t = Type.tcomplex32;
+        break; // goto LabelX
+      case TOK.complex64:
+        t = Type.tcomplex64;
+        break; // goto LabelX
+      case TOK.complex80:
+        t = Type.tcomplex80;
+        break; // goto LabelX
+      case TOK.bool_:
+        t = Type.tbool;
+        break; // goto LabelX
+      case TOK.char_:
+        t = Type.tchar;
+        break; // goto LabelX
+      case TOK.wchar_:
+        t = Type.twchar;
+        break; // goto LabelX
+      case TOK.dchar_:
+        t = Type.tdchar;
+        break; // goto LabelX
+
+      case TOK.vector: {
+        t = this.parseVector();
+        e = new TypeExp(loc, t);
+        return e;
+      }
+      case TOK.rvalue: {
+        this.nextToken();
+        this.checkFollowing(TOK.leftParenthesis, ds("`__rvalue`"));
+        e = this.parseAssignExp();
+        e.rvalue = true;
+        this.check(TOK.rightParenthesis);
+        return e;
+      }
+      default:
+        this.error(ds("expression expected, not `%s`"), this.token.toChars());
+        return null;
+    }
+    return this.parsePrimaryExp_LabelX(loc, t); // LabelX:
+  }
+
+  /* The `LabelX:` body of parsePrimaryExp for the basic-type primaries (parse.d:8459-8482).
    * Returns the parsed expression, or null to signal `goto Lerr`. */
   private parsePrimaryExp_LabelX(loc: Loc, t: Type): Expression | null {
     const next = this.peekNext();

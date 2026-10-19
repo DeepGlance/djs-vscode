@@ -43,7 +43,7 @@ Derived sets
    modules), under the licences in ldc-1.43.0/LICENSE, LDC's own: druntime and Phobos under the Boost Software
    License, Version 1.0; ldc/profile.di under the University of Illinois Open Source License and the MIT License.
 
-6. The D grammar. syntaxes/d.tmLanguage.json is code-d's syntaxes/d.json, unmodified, distributed under the MIT
+5. The D grammar. syntaxes/d.tmLanguage.json is code-d's syntaxes/d.json, unmodified, distributed under the MIT
    License: Copyright (c) 2015 Jan Jurzitza (code-d) and Copyright (c) 2014 Jan Van Uytven (the grammar). The full
    notices and the commit it was taken from are in syntaxes/LICENSE-code-d.
 

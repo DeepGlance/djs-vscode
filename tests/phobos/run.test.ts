@@ -71,10 +71,10 @@ describe("the .cg comparison and MISMATCH-CG", () => {
 });
 
 describe("enumeration and the timing table", () => {
-    test("skipOf: .d and .di are modules, a C header is SKIP-IMPORTC, a DCompute module SKIP-DCOMPUTE", () => {
+    test("skipOf: .d, .di and a C header are modules, a DCompute module SKIP-DCOMPUTE", () => {
         expect(skipOf("std/ascii.d")).toBeNull();
         expect(skipOf("ldc/intrinsics.di")).toBeNull();
-        expect(skipOf("importc.h")?.status).toBe("SKIP-IMPORTC");
+        expect(skipOf("importc.h")).toBeNull();
         expect(skipOf("README")?.status).toBe("SKIP-OTHER");
         expect(skipOf("ldc/opencl.di")?.status).toBe("SKIP-DCOMPUTE");
         expect(skipOf("ldc/dcompute/std/index.d")?.status).toBe("SKIP-DCOMPUTE");
@@ -83,11 +83,11 @@ describe("enumeration and the timing table", () => {
 
     test("skipNotes: one line per skip class present, with its count and reason", () => {
         const r = (file: string): PhobosResult => ({ dir: "ldc", file, ...skipOf(file)! });
-        const notes = skipNotes([r("ldc/opencl.di"), r("importc.h"), r("ldc/dcompute/x.d"),
+        const notes = skipNotes([r("ldc/opencl.di"), r("README"), r("ldc/dcompute/x.d"),
             { dir: "std", file: "std/ascii.d", status: "MATCH" }]).split("\n");
         expect(notes[0]).toBe("Notes");
         expect(notes[1]).toMatch(/^ {4}2 {2}SKIP-DCOMPUTE: a @compute module: .*gen\/semantic\.d:20.* not ported$/);
-        expect(notes[2]).toMatch(/^ {4}1 {2}SKIP-IMPORTC: a C source/);
+        expect(notes[2]).toMatch(/^ {4}1 {2}SKIP-OTHER: not a D or C source/);
         expect(notes.length).toBe(4);
     });
 

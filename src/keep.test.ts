@@ -187,6 +187,53 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
         expect(runs[1]!.kept.code).toBe(1);
     });
 
+    test("an instance made after an error, which looked for no copy constructor, is made again (clone.d:1688)",
+        async () => {
+            const lib = "module lib;\nstruct P { this(this) {} }\n"
+                + "struct W(T) { P p; T t; this(ref return scope W rhs) {} }\n";
+            const app = (decls: string): string => `module app;\nimport lib;\n${decls}\nvoid main() {}\n`;
+            const runs = await sequence({ "lib.d": lib, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("alias A = Undefined;\nalias X = W!int;") }, args: ARGS },
+                { files: { "app.d": app("alias X = W!int;") }, args: ARGS },
+                { args: ARGS },
+            ]);
+            expectFresh(runs, "fkkk");
+            const hides = "`struct W` implicitly-generated postblit hides copy constructor";
+            expect(runs[1]!.kept.stderr).not.toContain(hides);
+            expect(runs[2]!.kept.stderr).toContain(hides);
+            expect(runs[2]!.kept.seeds["error state (inst)"]).toBe(1);
+        });
+
+    test("an instance made after an error, which did not report a __traits giving no type, reports it (typesem.d:4405)",
+        async () => {
+            const lib = "module lib;\nstruct W(T) { __traits(isIntegral, T) x; }\n";
+            const app = (decls: string): string => `module app;\nimport lib;\n${decls}\nvoid main() {}\n`;
+            const runs = await sequence({ "lib.d": lib, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("alias A = Undefined;\nalias X = W!int;") }, args: ARGS },
+                { files: { "app.d": app("alias X = W!int;") }, args: ARGS },
+            ]);
+            expectFresh(runs, "fkk");
+            expect(runs[2]!.kept.stderr).toContain("Error: `__traits(isIntegral, int)` does not give a valid type");
+            expect(runs[2]!.kept.seeds["error state (inst)"]).toBe(1);
+        });
+
+    test("a library struct's isPOD answered after an error in the root is answered again once fixed", async () => {
+        const lib = "module lib;\nstruct S { int x; this(ref return scope S rhs) {} }\n";
+        const app = (decls: string): string => `module app;\nimport lib;\n${decls}\nvoid main() {}\n`;
+        const pod = "pragma(msg, __traits(isPOD, S));";
+        const runs = await sequence({ "lib.d": lib, "app.d": app(`alias A = Undefined;\n${pod}`) }, [
+            { args: ARGS },
+            { files: { "app.d": app(pod) }, args: ARGS },
+            { args: ARGS },
+        ]);
+        expectFresh(runs, "fkk");
+        expect(runs[0]!.kept.stdout + runs[0]!.kept.stderr).toContain("true");
+        expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toContain("false");
+        expect(runs[1]!.kept.seeds["error state cached"]).toBe(1);
+    });
+
     test("a line removed, then restored", async () => {
         const runs = await sequence({ "lib.d": LIB_DEPRECATED, "app.d": APP }, [
             { args: ARGS },
@@ -211,6 +258,31 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
         expectFresh(runs, "fkk");
         expect(runs[2]!.kept.stderr).toContain("undefined identifier `extra`");
     });
+
+    test("an import added whose struct is deferred where a kept instance that retries is first requested, then dropped",
+        async () => {
+            // `W!V` waits for V's size (deferred) while V's analysis requests isS!string, whose creation retries the
+            // deferred symbols (dmd/templatesem.d:1888): kept from a compile where none were, it replays where W!V is
+            // one, and the next compile, without b, where none is again
+            const lib = "module lib;\nstruct W(T) { T value; }\ntemplate isS(T) { enum isS = is(T == string); }\n";
+            const b = "module b;\nimport lib;\nstruct V {\n    W!V* next;\n    int x;\n    enum e = isS!string;\n"
+                + "    pragma(msg, \"V \", e);\n}\n";
+            const app = (imports: string): string => `module app;\nimport lib;\n${imports}enum y = isS!string;\n`
+                + "pragma(msg, \"app \", y);\n";
+            const runs = await sequence({ "lib.d": lib, "b.d": b, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("import b;\n") }, args: ARGS },
+                { files: { "app.d": app("") }, args: ARGS },
+                { files: { "app.d": app("import b;\n") }, args: ARGS },
+                { args: ARGS },
+            ]);
+            // the import added again: b's kept analysis puts back W!V, analysed already, among the deferred symbols
+            // where a fresh compile's is still deferred, and the retry at isS!string's replay finds it done
+            expectFresh(runs, "fkkfk");
+            expect(runs[1]!.kept.stderr).toBe("V true\napp true\n");
+            expect(runs[3]!.kept.reason).toBe("abort: other deferred symbols at the replay of lib.isS!string, whose "
+                + "retry of them does work");
+        });
 
     test("a library error gagged, then not needed, then ungagged", async () => {
         const lib = "module lib;\nint broken(T)(T t) { return t.nope; }\n";
@@ -867,6 +939,32 @@ void lf() { T!ubyte u; old(); }
             for (const r of runs.slice(1))
                 expect(r.kept.reason).toMatch(/^abort: creation of lib\.T!ubyte requested in another state: /);
         }
+    });
+
+    test("an instance one function's analysis created, requested first from the cycle's other end, aborts", async () => {
+        // the base: dec!(int[])'s body creates isR!(int[]) in impl's constraint; isR's lambda reaches front and dec
+        // again, running. The edit requests isR!(int[]) first: its replay reaches dec's body, whose log created the
+        // instance, now running. A fresh compile matches the half-built instance there and reads its member before
+        // it has a value (a gagged "undefined identifier `R`", printed by -verrors=spec), which no log holds: the
+        // replay cannot be what a fresh compile does. The same in the other direction (std.uuid's `to` in an
+        // application, std.utf.decode and std.range.primitives.isInputRange)
+        const lib = `module lib;
+enum bool isR(R) = is(typeof((R r) { return r.front; }));
+@property int front(T)(T[] a) { return dec(a); }
+int dec(S)(S s) { return impl(s); }
+int impl(S)(S s) if (is(S : int[])) { return 1; }
+int impl(S)(S s) if (is(S : long[]) || (isR!S && is(S == long[]))) { return 2; }
+`;
+        const app = "module app;\nimport lib;\nvoid main() { int[] a; dec(a); }\n";
+        const first = app.replace("void main", "enum x = isR!(int[]);\nvoid main");
+        const runs = await sequence({ "lib.d": lib, "app.d": app }, [
+            { args: ARGS },
+            { files: { "app.d": first }, args: ARGS },
+            { files: { "app.d": app }, args: ARGS },
+        ]);
+        expectFresh(runs, "fff");
+        for (const r of runs.slice(1))
+            expect(r.kept.reason).toBe("abort: creation of lib.isR!(int[]) requested in another state");
     });
 
     // -vcg-ast: a kept compile's module members are not a fresh one's (10 §4.7, the refused flags), so its dump would

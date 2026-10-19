@@ -729,7 +729,15 @@ export class Token {
         this.intUnsValue = toUint64(v);
     }
 
-    floatvalue: real_t = 0; // real_t floatvalue;  (separate bit-interpretation — see header)
+    // real_t floatvalue;  (separate bit-interpretation — see header). Meaningful only when `value` is a
+    // floating literal, which the lexer always writes, so the initial value is never read; it is D's `.init`
+    // for a floating type, NaN (09 §1.0).
+    // WHY it matters which: V8 gives a field the representation of the first value stored in it. An initial 0
+    // (a small integer) became a double at the first floating literal with a fractional value (in druntime,
+    // every process), which deprecated the Token map, and every compiled function that had seen a Token (scan,
+    // scanIdentifier, finishIdentifier, peek, ...) deoptimized on "wrong map" and was compiled again. NaN is a
+    // double from the first Token on.
+    floatvalue: real_t = NaN;
 
     // nested anonymous struct of the union: { union { ustring; interpolatedSet } len; postfix }
     ustring: DString | null = null; // const(char)* ustring; UTF8 string

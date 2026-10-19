@@ -43,6 +43,7 @@
 
 import { assert } from "../assert.js";
 import { ds } from "../dstring.js";
+import { K, keepErrorState } from "../keep.js";
 import { STC, TRUST, PURE, LINK, MODFlags, TY } from "./astenums.js";
 import type { MOD } from "./astenums.js";
 import { ClassKind } from "./aggregate.js";
@@ -54,6 +55,7 @@ import { StructDeclaration } from "./dstruct.js";
 import type { ClassDeclaration } from "./dclass.js";
 import { Scope } from "./dscope.js"; // value: `Scope scx;` (clone.d:572/:645) is a stack Scope
 import type { Dsymbol } from "./dsymbol.js";
+import { PASS } from "./dsymbol.js"; // value, read inside a body: the kept-module engine's `keptCtorsSkipped`
 // Value imports read post-load, only inside bodies (01 Rule 4.3): the generated members this
 // module constructs (`new VarDeclaration` for `__swap`, `new FuncDeclaration` for the generated
 // opAssign/__xopEquals/__xopCmp/__xtoHash, the Dtor/PostBlit/Invariant/Ctor declarations).
@@ -1763,6 +1765,49 @@ function findMoveAndCopyConstructors(ctor: Dsymbol, copyCtor: Ref<CtorDeclaratio
 }
 
 /**
+ * The kept-module engine (10 §4.7): whether the error test of `needCopyOrMoveCtor` (dmd/clone.d:1688) may have skipped
+ * a result, i.e. whether its body could set any of its four flags without that test, so that the unit running it holds
+ * only in a compile with errors (`keepErrorState`). Read without the body's search and `overloadApply`, which can
+ * report, analyse an alias or an enum, and assert (error recovery): the constructors are `sd.ctor` (set before the
+ * test, dmd/dsymbolsem.d:4831), followed along `overnext`; anything in that chain other than a plain constructor, a
+ * `__ctor` in the symbol table that `ctor` does not hold yet, a mixin's scope before `ctor` is set, and a field of an
+ * enum type not analysed yet count as a skipped result. A struct with no constructor and no field of a struct type with
+ * a copy or move constructor, the common case, skips nothing.
+ */
+function keptCtorsSkipped(sd: StructDeclaration): boolean {
+    if (sd.ctor === null && ((sd.symtab !== null && sd.symtab.lookup(Id.ctor!) !== null)
+        || (sd.semanticRun < PASS.semanticdone && sd.importedScopes !== null && sd.importedScopes.length !== 0)))
+        return true;
+    for (let d = sd.ctor; d !== null;) {
+        const c = d.isCtorDeclaration();
+        if (c === null || c.isCpCtor || c.isMoveCtor)
+            return true;
+        d = c.overnext;
+    }
+    for (const v of sd.fields) {
+        if ((v!.storage_class & STC.ref_) !== 0n || v!.overlapped)
+            continue;
+        let t: Type = v!.type!;
+        for (;;) {
+            const te = t.isTypeEnum();
+            const tsa = t.isTypeSArray();
+            if (te !== null) {
+                if (te.sym!.semanticRun < PASS.semanticdone || te.sym!.memtype === null)
+                    return true;
+                t = te.sym!.memtype;
+            } else if (tsa !== null)
+                t = tsa.next!;
+            else
+                break;
+        }
+        const ts = t.isTypeStruct();
+        if (ts !== null && (ts.sym!.hasCopyCtor || ts.sym!.hasMoveCtor))
+            return true;
+    }
+    return false;
+}
+
+/**
  * dmd/clone.d:1685 — `void needCopyOrMoveCtor(StructDeclaration sd, out bool hasCopyCtor,
  * out bool hasMoveCtor, out bool needCopyCtor, out bool needMoveCtor)`.
  *
@@ -1781,13 +1826,7 @@ function findMoveAndCopyConstructors(ctor: Dsymbol, copyCtor: Ref<CtorDeclaratio
  * written by this function, read back by the caller. The D signature (void return, four out
  * params) is preserved verbatim — 04 §0.1 forbids re-protocoling it to a returned record.
  *
- * The `dependency signature` record this declaration carried — a dependent still calling it with
- * one argument and reading a returned record — is RETIRED by this wave's sweep: dsymbolsem.ts:2040
- * and :5505 both call the five-argument out-box protocol now, so nothing diverges from the D
- * signature any more.
- *
- * POD note: no ctor member and no struct-typed field leaves all four flags false. No wall is on
- * that path.
+ * POD note: no ctor member and no struct-typed field leaves all four flags false.
  */
 export function needCopyOrMoveCtor(sd: StructDeclaration, hasCopyCtor: Ref<boolean>, hasMoveCtor: Ref<boolean>,
                                    needCopyCtor: Ref<boolean>, needMoveCtor: Ref<boolean>): void {
@@ -1798,8 +1837,10 @@ export function needCopyOrMoveCtor(sd: StructDeclaration, hasCopyCtor: Ref<boole
     needMoveCtor.value = false;
 
     //printf("needCopyOrMoveCtor() %s\n", sd.toChars());
-    if (global.errors !== 0)
+    if (global.errors !== 0) {
+        if (K.on && keptCtorsSkipped(sd)) keepErrorState(sd);     // the kept-module engine: see keptCtorsSkipped
         return;
+    }
 
     const ctor: Ref<Dsymbol | null> = { value: null };
     if (!findStructConstructorRoot(sd, ctor))

@@ -2,28 +2,34 @@
 //
 // The workspace is the fixture run.ts writes: `.vscode/settings.json` with a build-tool-shaped djs.ldc2Line (-Isrc,
 // --d-version=Foo, -i and --deps to be dropped) and compile on pause off, src/lib.d, src/app.d with one error after a
-// two-byte character on its line (dmd's byte column 40 is VS Code's character 38).
-// Opening app.d activates the extension; an edit adds a second error and the save compiles. The test checks the
-// diagnostics VS Code holds: lines, UTF-16 characters, the version flag reaching the compiler (no `no Foo`), the import
-// found through the relative -Isrc made absolute. That save is the session's first compile, fresh (`no kept state`,
-// `, fresh` in the status bar); a second save of the same content is kept by the worker's engine and leaves the same
-// diagnostics. Then VS Code's own hover and definition commands on `libValue` reach the extension's providers: the
-// signature and the doc comment of lib.d, the declaration in lib.d. The TextMate grammar tokenises app.d
-// (`_workbench.captureSyntaxTokens`, VS Code's own colorizer test command), and VS Code's semantic-tokens commands
-// reach the extension's provider: djs's legend, and tokens that decode to `libValue` as a function and `lib` as a
-// namespace. VS Code's inlay-hints command reaches the extension's provider on lib.d (compiled under -i): an inferred
-// return type, a template's instance count, a variable's type, two parameter names; an unsaved edit of lib.d moves them
-// with it. The `else` branch of app.d's `version (Foo)` is dimmed. VS Code's code-lens command reaches the extension's
-// provider on lib.d: the lens over `same!int`, whose command (djs.showExpansion) peeks at the instance in a
-// `djs-expansion:` document, coloured as D. djs.showAst at a cursor in lib.d's `libValue` opens lib.d's AST view beside
-// it, a `djs-ast:` document coloured as D, holding the declaration and revealing it; go-to-definition from the view
-// reaches the declaration in lib.d. The imports explorer lists the root, app; the instances explorer lists lib.d's
-// `same` with its one instance. An unsaved edit makes the hover the worker's stale reason, and the semantic-tokens
-// command rejects with the provider's CancellationError (the editor's request, the same function, then keeps its
-// tokens). A D file next to the workspace, in no folder, is not compiled and the status bar says so. Then compile on
-// pause, turned on: an unsaved edit of app.d compiles from its buffer, kept, its error on the document with no save,
-// and the status bar says `buffer`; a typed `lib.` completes, through VS Code's completion command, with lib.d's
-// `libValue`, a function, its signature and doc comment's summary.
+// two-byte character on its line (dmd's byte column 40 is VS Code's character 38). Opening app.d activates the
+// extension and compiles it with no edit and no save, the session's first compile, fresh (`no kept state`, `, fresh` in
+// the status bar), its error on the document; an outline asked before that compile waits for it. An edit adds a
+// second error and the save compiles, kept by the worker's engine. The test checks the diagnostics VS Code holds:
+// lines, UTF-16 characters, the version flag reaching the compiler (no `no Foo`), the import found through the
+// relative -Isrc made absolute. A second save of the same content is kept and leaves the same diagnostics. Showing
+// lib.d, which that compile analysed under -i, compiles nothing. Then VS Code's own
+// hover and definition commands on `libValue` reach the extension's providers: the signature and the doc comment of
+// lib.d, the declaration in lib.d. The TextMate grammar tokenises app.d (`_workbench.captureSyntaxTokens`, VS Code's
+// own colorizer test command), and VS Code's semantic-tokens commands reach the extension's provider: djs's legend, and
+// tokens that decode to `libValue` as a function and `lib` as a namespace. VS Code's inlay-hints command reaches the
+// extension's provider on lib.d (compiled under -i): an inferred return type, a template's instance count, a variable's
+// type, two parameter names; an unsaved edit of lib.d moves them with it. The `else` branch of app.d's `version (Foo)`
+// is dimmed. VS Code's code-lens command reaches the extension's provider on lib.d: the lens over `same!int`, whose
+// command (djs.showExpansion) peeks at the instance in a `djs-expansion:` document, coloured as D. djs.showAst at a
+// cursor in lib.d's `libValue` opens lib.d's AST view beside it, a `djs-ast:` document coloured as D, holding the
+// declaration and revealing it; go-to-definition from the view reaches the declaration in lib.d. VS Code's
+// document-symbol command reaches the extension's outline of lib.d, its reference command the references of `libValue`
+// in both files. The imports explorer lists the root, app; the instances explorer lists lib.d's `same` with its one
+// instance. An unsaved edit makes the hover the worker's stale reason, and the semantic-tokens command rejects with the
+// provider's CancellationError (the editor's request, the same function, then keeps its tokens). A D file next to the
+// workspace, in no folder, is not compiled and the status bar says so. Then compile on pause, turned on: an unsaved
+// edit of app.d compiles from its buffer, kept, its error on the document with no save, and the status bar says
+// `buffer` (an outline asked before that compile ran waits for it); a typed `lib.` completes, through VS Code's
+// completion command, with lib.d's `libValue`, a function, its signature and doc comment's summary, and so does a
+// request without a dot, among the imported modules' names; a call typed gets
+// lib.d's `twice` from VS Code's signature-help command, which waits for its pause compile. Last, VS Code's
+// rename command renames `libValue` in both files, which saved compile with no new error.
 
 import vscode = require("vscode");
 import assert = require("node:assert/strict");
@@ -77,11 +83,22 @@ async function run(): Promise<void> {
     assert.ok(ext, "the extension is loaded");
     const api = await ext.activate();
 
+    // compile at open: the outline, asked before the compile, waits for it; then the error, with no edit and no save
+    const openOutline = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        "vscode.executeDocumentSymbolProvider", uri);
+    assert.ok(openOutline.some((x) => x.name === "main"), JSON.stringify(openOutline.map((x) => x.name)));
+    await compiledAfter(api, undefined, 60000);
+    assert.deepEqual(api.lastCompile(), { mode: "fresh", reason: "no kept state" });
+    assert.match(api.statusText(), /, disk, fresh$/);
+    assert.deepEqual(shown(vscode.languages.getDiagnostics(uri)),
+        ["3:38-39 0 cannot implicitly convert expression `\"a\"` of type `string` to `int`"]);
+
+    const atOpen = api.lastCompile();
     const edit = new vscode.WorkspaceEdit();
     edit.insert(uri, new vscode.Position(doc.lineCount - 1, 0), "void h() { auto z = libValue() + \"q\"; }\n");
     assert.ok(await vscode.workspace.applyEdit(edit));
     assert.ok(await doc.save());
-    await api.whenIdle();
+    await compiledAfter(api, atOpen, 60000);
     const diags = await diagnosticsWithin(uri, 2, 60000);
 
     assert.deepEqual(shown(diags), [
@@ -89,8 +106,8 @@ async function run(): Promise<void> {
         "5:31-32 0 incompatible types for `(libValue()) + (\"q\")`: `int` and `string`",
     ]);
     assert.ok(diags.every((d) => d.source === "djs"));
-    assert.deepEqual(api.lastCompile(), { mode: "fresh", reason: "no kept state" });
-    assert.match(api.statusText(), /, fresh$/);
+    assert.deepEqual(api.lastCompile(), { mode: "kept", reason: "" });
+    assert.match(api.statusText(), /, disk$/);
 
     // the document is not dirty: `doc.save()` would not save it, the Save command does
     const first = api.lastCompile();
@@ -115,6 +132,20 @@ async function run(): Promise<void> {
     assert.equal(target.uri.fsPath, vscode.Uri.joinPath(folder.uri, "src", "lib.d").fsPath);
     assert.deepEqual([target.range.start.line, target.range.start.character, target.range.end.character], [2, 4, 12]);
 
+    // the outline of lib.d (compiled under -i) through VS Code's command
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        "vscode.executeDocumentSymbolProvider", vscode.Uri.joinPath(folder.uri, "src", "lib.d"));
+    assert.deepEqual(symbols.map((x) => `${x.name} ${x.kind}`), ["lib 1", "libValue 11", "twice 11", "same 11",
+        "four 11", "SameInt 11"]);
+    assert.equal(symbols[1]!.detail, "int()");
+    assert.deepEqual([symbols[1]!.selectionRange.start.line, symbols[1]!.selectionRange.start.character], [2, 4]);
+
+    // the references of `libValue` through VS Code's command: its declaration in lib.d, the call in app.d
+    const references = await vscode.commands.executeCommand<vscode.Location[]>("vscode.executeReferenceProvider",
+        uri, call);
+    assert.deepEqual(references.map((l) => `${l.uri.path.split("/").pop()}:${l.range.start.line}:`
+        + `${l.range.start.character}`), [`app.d:${call.line}:${call.character - 2}`, "lib.d:2:4"]);
+
     // inlay hints on lib.d through VS Code's command; an unsaved line above them moves them down
     const libUri = vscode.Uri.joinPath(folder.uri, "src", "lib.d");
     const libDoc = await vscode.workspace.openTextDocument(libUri);
@@ -125,10 +156,14 @@ async function run(): Promise<void> {
     assert.ok(await vscode.workspace.applyEdit(libEdit));
     assert.deepEqual(await hintsOf(libUri, libDoc.lineCount),
         expected.map((h) => h.replace(/^\d+/, (l) => String(Number(l) + 1))));
+    const beforeShown = api.lastCompile();
     await vscode.window.showTextDocument(libDoc);
     await vscode.commands.executeCommand("workbench.action.files.revert");
     assert.equal(libDoc.isDirty, false);
     await vscode.window.showTextDocument(doc);
+    await new Promise((r) => setTimeout(r, 1000));   // past the open delay: lib.d, analysed under -i, is not compiled
+    await api.whenIdle();
+    assert.equal(api.lastCompile(), beforeShown);
 
     // the `else` branch of `version (Foo)`, which -d-version=Foo did not choose, is dimmed
     const versionLine = doc.lineAt(4).text;
@@ -255,6 +290,10 @@ async function run(): Promise<void> {
     const pause = new vscode.WorkspaceEdit();
     pause.insert(uri, new vscode.Position(doc.lineCount - 1, 0), "void k() { int w = \"b\"; }\n");
     assert.ok(await vscode.workspace.applyEdit(pause));
+    // asked before the pause compile ran, the outline waits for it and has the new function
+    const outline = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        "vscode.executeDocumentSymbolProvider", uri);
+    assert.ok(outline.some((x) => x.name === "k"), JSON.stringify(outline.map((x) => x.name)));
     await compiledAfter(api, kept, 60000);
     assert.ok(doc.isDirty);
     assert.deepEqual(api.lastCompile(), { mode: "kept", reason: "" });
@@ -278,6 +317,26 @@ async function run(): Promise<void> {
     assert.match(libValue.detail ?? "", /int libValue\(\)/);
     assert.match(String(libValue.documentation), /The library's value/);
     assert.ok(libValue.sortText?.startsWith("0"));
+    // without a dot, on request: the names in scope, lib.d's `libValue` among the imported modules' (djs's group 3)
+    const inScope = await vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider", uri, new vscode.Position(dotLine, "void m() { li".length));
+    const imported = inScope.items.find((i) => labelOf(i) === "libValue"
+        && i.kind === vscode.CompletionItemKind.Function);
+    assert.ok(imported, JSON.stringify(inScope.items.map((i) => `${labelOf(i)} ${i.kind}`)));
+    assert.ok(imported.sortText?.startsWith("3"), imported.sortText);
+
+    // signature help on a call just typed, through VS Code's command: asked before the pause compile ran, it waits for
+    // it (the compile analyses past the open parenthesis) and gives lib.d's `twice`
+    const callLine = doc.lineCount - 1;
+    const typing = new vscode.WorkspaceEdit();
+    typing.insert(uri, new vscode.Position(callLine, 0), "void s2() { auto q = twice(\n");
+    assert.ok(await vscode.workspace.applyEdit(typing));
+    const help = await vscode.commands.executeCommand<vscode.SignatureHelp | undefined>(
+        "vscode.executeSignatureHelpProvider", uri, new vscode.Position(callLine, "void s2() { auto q = twice(".length),
+        "(");
+    assert.ok(help, "signature help answered");
+    assert.equal(help.signatures[help.activeSignature]?.label, "int twice(int n)");
+    assert.equal(help.activeParameter, 0);
 
     // leave app.d as saved: the setting off first, so that the revert compiles nothing
     await vscode.workspace.getConfiguration("djs").update("compileOnPause", false,
@@ -286,6 +345,24 @@ async function run(): Promise<void> {
     await vscode.window.showTextDocument(doc);
     await vscode.commands.executeCommand("workbench.action.files.revert");
     assert.equal(doc.isDirty, false);
+
+    // rename `libValue` through VS Code's command, after a compile of the saved text (the reverted buffer's compile is
+    // gone): one edit in each file; saved, they compile with the same two errors and nothing undefined
+    const beforeRename = api.lastCompile();
+    await vscode.commands.executeCommand("workbench.action.files.save");
+    await compiledAfter(api, beforeRename, 60000);
+    const renaming = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+        "vscode.executeDocumentRenameProvider", uri, call, "libNumber");
+    assert.deepEqual(renaming.entries().map(([u, es]) => `${u.path.split("/").pop()} ${es.length}`).sort(),
+        ["app.d 1", "lib.d 1"]);
+    assert.ok(await vscode.workspace.applyEdit(renaming));
+    const renamed = api.lastCompile();
+    assert.ok(await vscode.workspace.saveAll(false));
+    await compiledAfter(api, renamed, 60000);
+    const afterRename = shown(vscode.languages.getDiagnostics(uri));
+    assert.equal(afterRename.length, 2, JSON.stringify(afterRename));
+    assert.ok(afterRename.every((d) => !d.includes("undefined identifier")), JSON.stringify(afterRename));
+    assert.match(doc.lineAt(call.line).text, /libNumber\(\)/);
 }
 
 export = { run };

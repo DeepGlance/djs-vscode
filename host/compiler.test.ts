@@ -75,9 +75,9 @@ describe("DjsCompiler", () => {
     test("a refused switch: status 2 and the shim's line in the output; the worker serves the next call", async () => {
         const file = join(dir, "ok.d");
         writeFileSync(file, "module ok;\n");
-        const r = await compiler.compile(["--deps", "-c", "-o-", file]);
+        const r = await compiler.compile(["--makedeps", "-c", "-o-", file]);
         expect(r.status).toBe(2);
-        expect(r.output).toBe("djs: unsupported flag `--deps` (an ldc2 switch outside the shim's flag table (10 §4.2))\n");
+        expect(r.output).toBe("djs: unsupported flag `--makedeps` (an ldc2 switch outside the shim's flag table (10 §4.2))\n");
         const ok = await compiler.compile(["-c", "-o-", file]);
         expect([ok.status, ok.errors, ok.diagnostics.length]).toEqual([0, 0, 0]);
     });

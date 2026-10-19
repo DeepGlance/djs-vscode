@@ -1,13 +1,15 @@
 // Queries on the last compile's analysed AST, for an editor host: the hover text and the declaration of the symbol
 // under a position, the semantic tokens, the inlay hints, the inactive ranges and the expansion peeks of a file, the
-// AST view of a module, the template instances of files, the modules loaded with their imports, and the names after a
-// `.` (10 §4.7, "Queries").
+// AST view of a module, the template instances of files, the modules loaded with their imports, the names after a `.`
+// and those in scope, the outline of a file, the references of a symbol and its rename, and a call's signatures (10
+// §4.7, "Queries").
 //
 // Hand-written djs module, NOT a port of a dmd/ file: the 1.43.0 frontend has no query API (D language servers such as
 // serve-d run their own analysis). The host contract is 10 §4.7; the entries are `queryHover`, `queryDefinition`,
 // `querySemanticTokens` (with its legend, `SEMANTIC_TOKEN_TYPES` and `SEMANTIC_TOKEN_MODIFIERS`), `queryInlayHints`,
 // `queryInactiveRanges`, `queryExpansionSites`, `queryExpansion`, `queryAst`, `queryInstances`, `queryImports`,
-// `queryCompletion` and `dropQueryIndex`, exported through src/djs.ts.
+// `queryCompletion`, `queryDocumentSymbols`, `queryReferences`, `queryPrepareRename`, `queryRename`,
+// `querySignatureHelp` and `dropQueryIndex`, exported through src/djs.ts.
 //
 // THE CONTRACT. A query reads the frontend's module table (`Module.amodules`) as the last compile left it, whatever
 // that compile was (`djsMain` or `djsMainKept`, fresh or kept), and runs between compiles only. It is read-only: no
@@ -37,20 +39,51 @@
 // arguments in parentheses whose function the analysis resolved (`Call`), and the conditionals it decided (`Decided`).
 // A node's Loc is not always its identifier, and the key is found from it on the file's bytes (`keyAt`): a member
 // access is at its `.` (dmd/parse.d parsePostExp) or, once analysed, at its chain's leftmost operand (its key is then
-// its own `.name` along the chain, `memberHit`: `a.x.x` gives each `x` its own symbol), a call at its `(`, an
-// aggregate or a template at its keyword, a parameter at its type. Several hits at one key: the hit whose symbol's name
-// is the token's text wins over a lowered one (`__r12`, a `__ctor` call at a struct's name, the implicit `this`), and a
-// compiler-made name never answers; among the winners, the first, and when they come from several template instances,
-// the hover names the instance and the count. The walk also notes, raw, what the expansions and the Resolved sections
-// read (`Notes`: string mixins, template mixins, manifest constants and enum members, the lowered nodes, the key of
-// each variable and member access), which those build at their first need.
+// its own `.name` along the chain, `memberHit`: `a.x.x` gives each `x` its own symbol; of a parenthesised operand,
+// inside or at the `(`, the chain after its `)`, `groupChain`), a call at its `(`, an aggregate or a template at its
+// keyword, a parameter at its type. Several hits at one key: the hit whose symbol's name is the token's text wins over
+// a lowered one (`__r12`, a `__ctor` call at a struct's name, the implicit `this`), and a compiler-made name never
+// answers; among the winners, the first, and when they come from several template instances, the hover names the
+// instance and the count. The walk also notes, raw, what the expansions and the Resolved sections read (`Notes`: string
+// mixins, template mixins, manifest constants and enum members, the lowered nodes, the key of each variable and member
+// access), which those build at their first need.
 // THE FALLBACK. Where the analysis left no node, folded or rewritten away (an enum member or a manifest constant
 // replaced by its value, `S` in `S.staticMethod()`, a selective import's name), an identifier outside comments and
 // literals is looked up as written, read-only (`fallback`): after a `.`, in the scope of the symbol before it; else
-// from the innermost analysed function holding it, through the symbol tables (`lookupLexical`). It does not answer
-// in code the analysis skipped, where the tables around it hold other names: in the body of a function not
-// analysed (a template's own members, the branch a condition did not choose, semantic3 not run), and with a
-// runtime variable or parameter, which no analysis folds away (the branch a `static if` statement did not choose).
+// from the innermost analysed function holding it, through the symbol tables (`lookupLexical`). It does not answer in
+// code the analysis skipped, where the tables around it hold other names: in the body of a function not analysed (a
+// template's own members, the branch a condition did not choose, semantic3 not run, a unittest's body without
+// `-unittest`, which the parser skips), and with a runtime variable or parameter, which no analysis folds away (the
+// branch a `static if` statement did not choose), except in the body of a function whose analysis reported errors
+// (`erroneousBody`): an expression with an error leaves an `ErrorExp`, a statement with one an `ErrorStatement` that
+// its block becomes, so the walk meets none of their names. There a name is looked up by position as completion finds a
+// first link (`brokenBodyLookup`: the function's locals declared before it, then the scopes outward), outside the
+// inactive branches; a name found outside the function's locals is refused when the body's text declares it, names it
+// as a lambda's untyped parameter, or holds a `with` statement, scopes the tables do not show.
+// The lookup follows the imports declared in the function bodies holding the name, before it (`localImported`: a
+// renamed import's name, a selective import's, a plain import's module), then the tables outward, at the module what
+// its imports give as dmd's `search` finds it (`importedName`, `searchModule`: an imported module's own member, else
+// its non-private imports', the symbols not visible from the module left out); after a `.`, a module's or a package's
+// member through its imports and its package.d (`memberNamed`). Where two imports give different symbols (`search`
+// reports an ambiguity, or merges overloads across modules) it answers nothing. A plain import's name answers as its
+// first package (`std` of `std.file.exists`), as the analysis resolves it; a renamed import's name as the import. A
+// runtime variable answers where the analysis left a node of it under another name at the token or along the chain
+// before it (`resolvedNear`: `stdout` for its alias's target `__stdoutp`, a Tuple's `st.terminated`). It never answers
+// for the words that are no symbol (`fallbackAllowed`: `exit` in `scope(exit)` is not core.stdc.stdlib's `exit`). A
+// runtime variable before `.sizeof`, `.alignof`, `.mangleof` or `.stringof`, or inside `typeof(...)`, answers outside
+// the inactive branches: those keep no node of their operand (`foldedOperand`), and a member after it (through a
+// pointer) answers.
+// A template's parameter with no node (in the parameter list, a constraint, a `static if` condition, a template's
+// argument) answers with the argument it stands for, as a use with a node does: of the instance whose analysed function
+// holds it, else the first, the hover counting them (`templateArgument`).
+// BUILT-IN PROPERTIES and TYPE PARAMETERS. Two names no symbol stands for, answered by the hover alone. An identifier
+// after a `.` that nothing above answers and that is one of the spec's properties of the operand's type (`builtinAt`,
+// the list of completion's group 2, `builtins`): kind `property`, its type as that list gives it and the operand's
+// type; the operand (`operandBefore`) is a basic type's keyword, a string literal, or the identifier ending it, past
+// calls, indexes and template arguments, by its hit (in a template's code, the first instance's) or the fallback's
+// symbol, or a parenthesised name dereferenced (`(*p).length`, `groupedOperand`). The definition says `a built-in property has no declaration`. A parameter named in a function or delegate
+// type written in a declaration (`void delegate(int code) cb;`, `Notes.parameters`): kind `parameter`, as hdrgen prints
+// the analysed parameter; its definition is its own name.
 //
 // A REQUEST carries the document's current text. When it differs from the text the compile read (`Module.src`, less a
 // UTF-8 byte order mark), the answer is empty with `stale` set: every position would be wrong. A completion is the
@@ -163,7 +196,9 @@
 // in parentheses (`(*p).opUnary!"-"()`); its arguments, as the other nodes, by hdrgen. A part whose text names a
 // compiler's temporary (`__r12`) is not shown, but for a lowered `foreach`. A hover at a token where one sits and no
 // identifier (an operator, `a+b` included) or no symbol (`foreach`, `new`, `cast`) answers with the section alone,
-// kind `operator`, `statement` for `foreach`, `expression` for another word.
+// kind `operator`, `statement` for `foreach`, `expression` for another word. A `Lowered:` part that calls a function
+// (an operator's overload, `opApply`) is followed by that function's doc summary (`Resolution.called`): at an operator
+// the hover has no other text to show it.
 //
 // INLAY HINTS (`queryInlayHints`), three kinds, for the declarations and calls of a range:
 //   type        a variable declared without a type (`auto x`, `const x = 1`, `enum x = 1`, `foreach (i, ref x; r)`,
@@ -260,8 +295,83 @@
 //      an instance the compile made with such a parameter. No other conversion, no template constraint;
 //   2  built-in properties, the spec's fixed lists (`builtins`; an enum value's `min` and `max` are the enum's).
 // An item: kind (`completionKind`), detail (the hover's signature on one line, `(+N overloads)` after a member
-// function's), documentation (the doc comment's summary as `DocComment.parse` splits it, on one line). Sorted by
-// group, then label.
+// function's), documentation (the doc comment's summary as `DocComment.parse` splits it, on one line: the overload
+// the item shows first, a UFCS candidate's receiving overload, then the name's). Sorted by group, then label.
+// Without a `.` before the identifier being typed (or with nothing typed), the names visible there (`scopeCompletion`,
+// `scopeItems`), from the same compile and the same scope, found at the position moved as the dot is (of a template's
+// instances, the first copy), one item per name, the innermost declaration winning:
+//   0  the locals and parameters of the functions holding the position (a nested function's, then its enclosing
+//      ones'): those the walk met and those of the function's table it did not (a body with errors; nested functions
+//      and aggregates), at their own locations, declared before the position in a block still open there or, declared
+//      in a statement's parentheses (`foreach`, `if (auto x = ...)`, `catch`), within that statement (`openAt`); the
+//      parameters of a template instance holding it; the function-local renamed imports before it (`import io = ...`);
+//   1  the members of the aggregate whose member function holds it: `this`'s as after `this.` (its qualifier's
+//      methods, its `alias this`'s), a static member function's static members;
+//   2  the module's own members and the names its imports declare (`std` of `import std.stdio;`, a renamed import);
+//   3  the public members of the modules it imports, their public imports followed, and of the function-local imports
+//      before the position (a selective import's names).
+// Not the keywords (the grammar's), nor the compiler's names. Each item as after a dot, its overloads counted; a
+// module's entries are listed once per compile and their items printed at the first need (`moduleItems`, `itemOf`).
+//
+// DOCUMENT SYMBOLS (`queryDocumentSymbols`). The file's declarations as a tree, from the module's members as the last
+// compile left them (`Outline`): the module declaration; one `imports` node per scope holding its imports; aggregates,
+// enums, templates and template mixins with their members (a template with an eponymous member, `struct Pair(T)`, is
+// one node of the member's kind, the template's parameters before the member's detail; another template a
+// `namespace`); functions with the functions, aggregates, enums and templates declared in their bodies, which come
+// from the index (the declarations the walk met at their names, of every analysed copy; none in a body no analysis
+// ran); variables, aliases, enum members, unittests, constructors and the other special functions by their D
+// spelling (`this`, `~this`, `this(this)`, `static this`, `invariant`, `unittest`). Attributes are transparent; of a
+// `version`, `debug` or `static if`, the branch the analysis chose (both when it decided none, as in a template's
+// members): a declaration in a branch not chosen is absent, as it has no semantic tokens; a `static foreach`, its
+// expanded members (one node per name and place). A string mixin's declarations are its children's level's, at the
+// mixin's range, their detail starting `(mixin) `; a template mixin's members are its children at its range. The
+// compiler's names (`__xopEquals`, an anonymous member's) and the functions it generates (an `opAssign` of a struct
+// with a field that has one) are not shown. Kinds are LSP's names (`SymbolKindName`); a
+// template's members, not analysed, are fields and methods by their place in an aggregate. A node's selection is its
+// name's key (`keyAt`); its range runs from the first token of the declaration's line (back to a `;` or a brace) to
+// its end (`statementEnd`: the block, or the `;`); an enum member's is its name. The detail, cut at HINT_TYPE_WIDTH: a
+// function's type, a variable's, an enum's base type, an enum member's initializer as written, an aggregate's bases,
+// an alias's target, a template's parameters.
+//
+// REFERENCES (`queryReferences`). The tokens of every module the last compile analysed (its roots and the modules `-i`
+// compiled, `analysedModules`; not those only imported, whose bodies no analysis ran) that name the symbol at a
+// position. The target is the token's symbol as the semantic tokens find it (`tokenSymbol`: the index's hit, else the
+// fallback, so a folded enum member or manifest constant is found), a template instance standing for its template, a
+// constructor named by its aggregate's name (`S(1)`, `new S`) for the aggregate; or a parameter of a template declared
+// in the file whose extent holds the token, not after a `.` (`parameterAt`). A symbol is identified by its
+// declaration's identifier (`referenceKey`: a template member and its copies in every instance, a function template and
+// its instances' functions are one), or by itself when it has none (no location, declared in a string mixin; such a
+// declaration is listed at its name inside the mixin's literal when `mixinSite` finds it there). Each
+// occurrence of the name in code (`occurrences`, comments and literals skipped) is a reference when one of the hits
+// there (`choose`) or the token's symbol has the target's key, or is a constructor of the aggregate the target is: a
+// call through UFCS, a property call, a member of an instance, a selective import's name, an alias's target as written
+// all are. A template parameter's references are its name's occurrences in the template's extent, outside a nested
+// template declaring the same name. Not found: the uses in a module only imported, in a branch not chosen, in a
+// function body no analysis ran (a template without instances), the names a string mixin's text spells, and an implicit
+// use with no token of the name (an operator's `opBinary`, a `foreach` range's `front`). Each reference says whether it
+// is the declaration's own name (`isDeclarationAt`).
+//
+// RENAME (`queryPrepareRename`, `queryRename`). The references' target, renamed at every reference, the declaration's
+// name included, unless one of them could be missed (`renameTarget` refuses, with the reason): a module or a package
+// (renamed with its file); a constructor or another special function (`this`); a name D calls with no token of its own
+// (`opBinary` and the other `op` names, a range's `front`, `empty`, ..., `length`, `toString`, `toHash`:
+// `IMPLICIT_NAMES`); a symbol declared in a string mixin or with no declaration; one declared in a module the last
+// compile only imports (the bundled import tree's included), whose other users no analysis saw; a name a string mixin's
+// text spells as a word in a searched module, in a token string or in a literal of a `mixin (...)`'s arguments
+// (`mixinSpelling`; a string built elsewhere and mixed in is not seen). The new name must be a D identifier, not a
+// keyword, not starting with `__`, and not declared already in the symbol's scope (a template parameter: not spelled in
+// the template); a clash in a function's locals is not checked (the next compile reports it).
+//
+// SIGNATURE HELP (`querySignatureHelp`). The call whose parentheses hold the position: the innermost `(` open there,
+// found backwards over the code up to the statement's start (`openParen`), the callee the identifier before it (past
+// `!arg` or `!(...)`). The candidates (`callCandidates`): the function the compile resolved the call to (`Call`, an
+// instance's function when it instantiated a template), then the rest of the name's overload set (`overloadSet`; a
+// template not instantiated for this call as its eponymous function, its parameters as written); with no resolved call
+// (a call being typed, compiled with the parse error), the overload set of the symbol at the callee (the hit, else the
+// fallback); an aggregate's name gives its constructors. A candidate's label is `ret name(params)` (a constructor's
+// `S(params)`, a template's parameters after the name), each parameter as hdrgen prints it, with its span; the doc
+// summary is the hover's. The active parameter counts the commas at the call's depth before the position, plus one for
+// a UFCS receiver (the resolved call's, or a free function after a `.`).
 //
 // Cost: the first query on a file decodes its text and walks its AST and its templates' instances (a large
 // application module: ~50 ms); the next ones compare the request's text with the compiled one, look the key up and print.
@@ -284,7 +394,7 @@ import { DocComment } from "./dmd/doc.js";
 import {
     EXPtoString, HdrGenState, dsymbolToCBuffer, dsymbolToChars, expToCBuffer, expressionToChars,
     faithfulEnumMemberInteger, functionToBufferFull, initializerToChars, registerDsymbolPrintHook,
-    registerEnumMemberInteger, registerOptimize, statementToCBuffer,
+    parameterToChars, registerEnumMemberInteger, registerOptimize, statementToCBuffer,
 } from "./dmd/hdrgen.js";
 import { optimize } from "./dmd/optimize.js";
 import { EXP } from "./dmd/tokens.js";
@@ -294,7 +404,7 @@ import { OutBuffer } from "./dmd/common/outbuffer.js";
 import { Id } from "./dmd/id.js";
 import { Identifier } from "./dmd/identifier.js";
 import { DYNCAST } from "./dmd/rootobject.js";
-import { cstr, dsToJs } from "./dstring.js";
+import { cstr } from "./dstring.js";
 import type { DString } from "./dstring.js";
 import type { AggregateDeclaration } from "./dmd/aggregate.js";
 import { ConditionalDeclaration, StaticForeachDeclaration } from "./dmd/attrib.js";
@@ -313,7 +423,8 @@ import type {
 } from "./dmd/expression.js";
 import type { FuncDeclaration } from "./dmd/func.js";
 import type { Loc, SourceLoc } from "./dmd/location.js";
-import type { Type, TypeFunction } from "./dmd/mtype.js";
+import { Type } from "./dmd/mtype.js";
+import type { Parameter, TypeFunction } from "./dmd/mtype.js";
 import type { Catch, CompoundStatement, Statement } from "./dmd/statement.js";
 import { compiledImports } from "./dmd/compiler.js";
 import { keepAllGeneratedNames, keepGeneratedNames, keepRenumbered } from "./keep.js";
@@ -372,7 +483,10 @@ interface Hit {
     inst: TemplateInstance | null;
 }
 
-/** A function's byte range, from its name to its closing brace; `fd` null when the analysis did not run its body. */
+/**
+ * A function's byte range, from its name to its closing brace (a unittest the parser skipped: from its keyword);
+ * `fd` null when the analysis did not run its body.
+ */
 interface Body {
     start: number;
     end: number;
@@ -442,6 +556,11 @@ interface Notes {
     lowered: Lowered[];
     /** The key (`keyAt`) of each variable and member access the walk recorded a hit for. */
     keys: Map<Expression, number>;
+    /**
+     * A parameter named in a function or delegate type written in a declaration (`void delegate(int code) cb;`), at
+     * its name, with the analysed type it belongs to: no symbol stands for it (TYPE PARAMETERS in the header).
+     */
+    parameters: Map<number, { param: Parameter; tf: TypeFunction }>;
 }
 
 interface FileIndex {
@@ -483,6 +602,8 @@ const generatedBy = new Map<Dsymbol, Map<Identifier, FreshNumber>>();
 let allGenerated: Map<Identifier, FreshNumber[]> | null = null;
 /** The generated identifiers a print left unspelled since the last compile (`queryAmbiguousNames`). */
 const ambiguous = new Set<Identifier>();
+/** The items of each module's table for a completion without a dot (`moduleItems`), printed at the first need. */
+const moduleItemCache = new Map<ScopeDsymbol, ModuleEntry[]>();
 
 /**
  * Drops every index: called by src/djs.ts when a compile starts, since the indexes point into the AST that compile
@@ -495,14 +616,19 @@ export function dropQueryIndex(): void {
     generatedBy.clear();
     allGenerated = null;
     ambiguous.clear();
+    moduleItemCache.clear();
+    searches.clear();
 }
 
 const utf8 = new TextDecoder();
 const encoder = new TextEncoder();
 
-/** The text of a frontend string (`cstr`: an `extractChars` result carries its terminator). */
+/**
+ * The text of a frontend string (`cstr`: an `extractChars` result carries its terminator). Through the module's one
+ * decoder: `dsToJs` constructs a TextDecoder per call, which dominated a completion's thousands of names.
+ */
 function str(s: DString | null): string {
-    return s === null ? "" : dsToJs(cstr(s));
+    return s === null ? "" : utf8.decode(cstr(s));
 }
 
 function identText(id: Identifier | null): string {
@@ -656,6 +782,47 @@ function chainName(t: Uint8Array, p: number, names: readonly string[], skip = 0)
     return -1;
 }
 
+/** The words a parenthesised expression may follow (`return (x).y;`): its `(` is no call's, cast's or condition's. */
+const BEFORE_GROUP: ReadonlySet<string> = new Set(["", "return", "case", "throw"]);
+
+/**
+ * Whether the `(` at `open` starts a parenthesised expression: no identifier before it (a call's `f(`, a `typeof(`),
+ * but a word of BEFORE_GROUP; a `)` before it may close a cast (`cast(uint) (*p).length`). Whitespace is skipped
+ * backwards, not comments.
+ */
+function groupingParen(t: Uint8Array, open: number): boolean {
+    let q = open;
+    while (q > 0 && isSpace(t[q - 1]!))
+        q--;
+    let b = q;
+    while (b > 0 && isIdentByte(t[b - 1]))
+        b--;
+    return t[q - 1] !== 0x21 && BEFORE_GROUP.has(utf8.decode(t.subarray(b, q)));
+}
+
+/**
+ * The first of `names` along the postfix chain after the parenthesised expression holding byte `p`
+ * (`(cast(C) o).f`, at `o`: the access's location is inside the parentheses), after `skip` earlier ones; -1 when `p`
+ * is in none, or no `.` follows its `)`. Searched back within NAME_WINDOW bytes, up to a `;` or a brace.
+ */
+function groupChain(t: Uint8Array, p: number, names: readonly string[], skip: number): number {
+    let depth = 0;
+    for (let q = p - 1; q >= 0 && q > p - NAME_WINDOW; q--) {
+        const c = t[q];
+        if (c === 0x3b || c === 0x7b || c === 0x7d)
+            return -1;
+        if (c === 0x29)
+            depth++;
+        else if (c === 0x28 && depth-- === 0) {
+            if (!groupingParen(t, q))
+                return -1;
+            const close = skipBalanced(t, q, Math.min(t.length, q + NAME_WINDOW));
+            return t[close - 1] === 0x29 ? chainName(t, close, names, skip) : -1;
+        }
+    }
+    return -1;
+}
+
 /** The start of the identifier that ends just before byte `p` (trivia skipped backwards over spaces only), or -1. */
 function identBefore(t: Uint8Array, p: number): number {
     while (p > 0 && (t[p - 1] === 0x20 || t[p - 1] === 0x09))
@@ -700,7 +867,12 @@ function keyAt(t: Uint8Array, offset: number, names: readonly string[], skip = 0
                 && names.includes(utf8.decode(t.subarray(callee, identEnd(t, callee)))))
                 return { start: callee, named: true };
             const member = chainName(t, p, names, skip);   // `S(1).method()`: the call's `(` is the access's location
-            return member >= 0 ? { start: member, named: true } : null;
+            if (member >= 0)
+                return { start: member, named: true };
+            // a parenthesised operand is located at its `(`: `(c).f`'s variable `c`
+            const inner = skipTrivia(t, p + 1);
+            return skip === 0 && groupingParen(t, p) && names.includes(wordAt(t, inner))
+                ? { start: inner, named: true } : null;
         }
         const found = findName(t, p, names);
         return found < 0 ? null : { start: found, named: true };
@@ -713,7 +885,9 @@ function keyAt(t: Uint8Array, offset: number, names: readonly string[], skip = 0
     }
     if (operand || !KEYWORDS.has(word)) {
         const member = chainName(t, e, names, skip);
-        return member >= 0 ? { start: member, named: true } : { start: p, named: false };
+        const outer = member < 0 ? groupChain(t, p, names, skip) : -1;   // `(cast(C) o).f`: the access is at `o`
+        return member >= 0 || outer >= 0 ? { start: member >= 0 ? member : outer, named: true }
+            : { start: p, named: false };
     }
     const found = findName(t, e, names);
     return found < 0 ? null : { start: found, named: true };
@@ -854,10 +1028,14 @@ function memberIdent(e: Expression): Identifier | null {
 
 /**
  * The symbol `id` names from `scope`, by a read-only walk of the symbol tables (`DsymbolTable.lookup`): each
- * enclosing function's local table, each enclosing scope's table, then at the module the tables of the modules it
- * imports. No `search` (it may run semantic), so a name reached only through a public import chain is not found.
+ * enclosing function's local table, each enclosing scope's table, then at the module what its imports give
+ * (`importedName`: dmd/dsymbolsem.d `search` follows a public import chain, `import std.datetime;` reaches
+ * std.datetime.systime's `Clock`). No `search` itself: it may run semantic and caches what it finds (`OverloadSet`s, a
+ * module's search cache). Null when no table holds the name, or when two imports give different symbols.
  * A template parameter is not found (a use of `T` in an instance answers with the argument it stands for; the
  * tokens look parameters up apart, `templateParameter`).
+ * Cost: at the module, every module the imports reach publicly is read once per name and compile (a large
+ * application module under -i: a few hundred), then the answer is cached (`searches`).
  */
 function lookupLexical(scope: Dsymbol | null, id: Identifier): Dsymbol | null {
     for (let s = scope; s !== null; s = s.parent) {
@@ -869,16 +1047,114 @@ function lookupLexical(scope: Dsymbol | null, id: Identifier): Dsymbol | null {
         const found = sds?.symtab?.lookup(id) ?? null;
         if (found !== null)
             return found;
-        if (s.isModule() !== null) {
-            for (const imp of s.isModule()!.importedScopes ?? []) {
-                const r = imp?.isScopeDsymbol()?.symtab?.lookup(id) ?? null;
-                if (r !== null)
-                    return r;
-            }
-            return null;
-        }
+        if (s.isModule() !== null)
+            return importedName(sds!, id);
     }
     return null;
+}
+
+/** What `id` gives in a module's imports, or a module's own members, per compile (`importedName`, `moduleMember`). */
+const searches = new Map<ScopeDsymbol, Map<Identifier, Dsymbol[]>>();
+
+/**
+ * The symbol `id` names in the scopes module `m` imports, read-only, as dmd/dsymbolsem.d `search` finds it there:
+ * through each import, private ones included (a module sees its own), what `searchModule` gives, and a template
+ * mixin's table; the symbols not visible from `m` left out. Two that are one symbol count once (`sameSymbol`). Where
+ * several are left, `search` reports an ambiguity, or merges functions or templates into an overload set across
+ * modules, and the query names neither: null. C symbols excepted: of those `search` takes the first (C has one global
+ * name space), and so does this.
+ */
+function importedName(m: ScopeDsymbol, id: Identifier): Dsymbol | null {
+    const found: Dsymbol[] = [];
+    for (const ss of m.importedScopes?.opSlice() ?? []) {
+        if (ss === null)
+            continue;
+        const own = ss.isModule() === null ? ss.isScopeDsymbol()?.symtab?.lookup(id) ?? null : null;
+        for (const c of own !== null ? [own] : ss.isModule() !== null ? searchModule(ss.isScopeDsymbol()!, id) : [])
+            if (visibleFrom(m, c))
+                addDistinct(found, c);
+    }
+    return single(found);
+}
+
+/** The one symbol of `found`, else the first when all are C symbols, else null (none, or an ambiguity). */
+function single(found: readonly Dsymbol[]): Dsymbol | null {
+    return found.length === 1 || (found.length > 1 && found.every((c) => c.isCsymbol())) ? found[0]! : null;
+}
+
+/**
+ * The symbols `id` names in module `mod` as an importer reaches it (dmd/dsymbolsem.d `search` with
+ * `ignorePrivateImports`): its own table's entry, private or not (the importer's visibility check drops it, and then
+ * nothing else answers); else, recursively, what each import of `mod` that is not private gives, visible from `mod`,
+ * one per symbol (`addDistinct`). A module met again while its search runs gives nothing (a cycle of public imports,
+ * dmd's `insearch`). Cached per compile (`searches`).
+ */
+function searchModule(mod: ScopeDsymbol, id: Identifier): readonly Dsymbol[] {
+    let byName = searches.get(mod);
+    if (byName === undefined)
+        searches.set(mod, byName = new Map());
+    const known = byName.get(id);
+    if (known !== undefined)
+        return known;
+    byName.set(id, []);
+    const own = mod.symtab?.lookup(id) ?? null;
+    const found: Dsymbol[] = own !== null ? [own] : [];
+    const scopes = own === null ? mod.importedScopes?.opSlice() ?? [] : [];
+    for (let k = 0; k < scopes.length; k++) {
+        const ss = scopes[k] ?? null;
+        if (ss === null || mod.visibilities?.[k] === Visibility.Kind.private_)
+            continue;
+        const inner = ss.isModule() === null ? ss.isScopeDsymbol()?.symtab?.lookup(id) ?? null : null;
+        for (const c of inner !== null ? [inner] : ss.isModule() !== null ? searchModule(ss.isScopeDsymbol()!, id) : [])
+            if (visibleFrom(mod, c))
+                addDistinct(found, c);
+    }
+    byName.set(id, found);
+    return found;
+}
+
+/**
+ * Whether `s` is visible from module `m` as a lookup sees it (dmd/access.d `symbolIsVisible`, read-only and
+ * approximated: `private` only from its own module; `package` and `protected` as visible).
+ */
+function visibleFrom(m: ScopeDsymbol, s: Dsymbol): boolean {
+    const kind = s.visible().kind;
+    return kind !== Visibility.Kind.none && (kind !== Visibility.Kind.private_ || s.getAccessModule() === m.isModule());
+}
+
+/** Appends `c` to `found` unless it is one of them (`sameSymbol`). */
+function addDistinct(found: Dsymbol[], c: Dsymbol): void {
+    if (!found.some((x) => sameSymbol(x, c)))
+        found.push(c);
+}
+
+/**
+ * Whether two symbols a lookup found are one, as dmd/dsymbolsem.d `search` decides it, read-only: the same symbol
+ * after following aliases (`aliasTarget`: a selective import's alias and its target), two aliases of one type, two
+ * imports of one module or of one first package name.
+ */
+function sameSymbol(a: Dsymbol, b: Dsymbol): boolean {
+    if (a === b)
+        return true;
+    const i1 = a.isImport();
+    const i2 = b.isImport();
+    if (i1 !== null && i2 !== null)
+        return i1.mod === i2.mod || (i1.parent?.isImport() === null && i2.parent?.isImport() === null
+            && i1.ident === i2.ident);
+    const ta = resolvedAlias(a);
+    const tb = resolvedAlias(b);
+    if (ta.sym !== null && ta.sym === tb.sym)
+        return true;
+    return ta.type !== null && tb.type !== null && ta.type.equals(tb.type);
+}
+
+/** What an alias stands for, read-only: its symbol (`aliasTarget`), else its type; any other symbol, itself. */
+function resolvedAlias(s: Dsymbol): { sym: Dsymbol | null; type: Type | null } {
+    const al = s.isAliasDeclaration();
+    if (al === null)
+        return { sym: s, type: null };
+    const sym = aliasTarget(al);
+    return { sym, type: sym === null ? al.type : null };
 }
 
 /**
@@ -932,7 +1208,8 @@ class IndexWalker extends SemanticTimeTransitiveVisitor {
     private readonly walkedInstances = new Set<TemplateInstance>();
     private readonly fileOf = new Map<DString, boolean>();
     /** What the expansions and the Resolved sections read (`Notes`), raw, in walk order. */
-    readonly notes: Notes = { mixins: [], runs: [], templateMixins: [], manifests: [], lowered: [], keys: new Map() };
+    readonly notes: Notes = { mixins: [], runs: [], templateMixins: [], manifests: [], lowered: [], keys: new Map(),
+        parameters: new Map() };
     readonly imports: { at: number; imp: Import }[] = [];
     readonly locals: { at: number; v: VarDeclaration }[] = [];
     private readonly mixinLines = new Map<DString, number>();
@@ -1025,7 +1302,10 @@ class IndexWalker extends SemanticTimeTransitiveVisitor {
             this.typeRefs(next, same !== null ? elementType(same) : null, scope);
     }
 
-    /** The return and parameter types of a function type as written, against the analysed one. */
+    /**
+     * The return and parameter types of a function type as written, against the analysed one; the names of its
+     * parameters (`Notes.parameters`), the analysed parameter when the two lists match.
+     */
     private functionTypeRefs(orig: TypeFunction, res: TypeFunction | null, scope: Dsymbol | null): void {
         this.typeRefs(orig.next, res?.next ?? null, scope);
         const ps = orig.parameterList.parameters;
@@ -1033,8 +1313,14 @@ class IndexWalker extends SemanticTimeTransitiveVisitor {
         if (ps === null)
             return;
         for (let i = 0; i < ps.length; i++) {
-            const r = rs !== null && rs.length === ps.length ? rs.opIndex(i)?.type ?? null : null;
-            this.typeRefs(ps.opIndex(i)?.type ?? null, r, scope);
+            const analysed = rs !== null && rs.length === ps.length ? rs.opIndex(i) ?? null : null;
+            this.typeRefs(ps.opIndex(i)?.type ?? null, analysed?.type ?? null, scope);
+            const p = ps.opIndex(i) ?? null;
+            const off = p !== null && p.ident !== null ? this.offsetOf(p.loc) : null;
+            const k = off !== null ? keyAt(this.bytes, off, [identText(p!.ident)]) : null;
+            if (k !== null && k.named && !this.notes.parameters.has(k.start))
+                this.notes.parameters.set(k.start, analysed !== null && res !== null ? { param: analysed, tf: res }
+                    : { param: p!, tf: orig });
         }
     }
 
@@ -1308,12 +1594,21 @@ class IndexWalker extends SemanticTimeTransitiveVisitor {
             this.decided.push({ at, inc, hasElse });
     }
 
-    /** Records the byte range of `f`'s body, `analysed` or not (`Body`); one without a body records nothing. */
+    /**
+     * Records the byte range of `f`'s body, `analysed` or not (`Body`); one without a body records nothing, but for a
+     * unittest whose body the parser skipped (no `-unittest`: dmd/parse.d keeps an empty `UnitTestDeclaration` whose
+     * `endloc` is the token after the `}`), recorded as not analysed up to that token, so that the fallback does not
+     * answer from the module's tables inside it.
+     */
     private body(f: FuncDeclaration, analysed: boolean): void {
         const start = this.offsetOf(f.loc);
         const end = this.offsetOf(f.endloc, true);
-        if (f.fbody !== null && start !== null && end !== null && end > start)
+        if (start === null || end === null || end <= start)
+            return;
+        if (f.fbody !== null)
             this.functions.push({ start, end, fd: analysed ? f : null });
+        else if (f.isUnitTestDeclaration() !== null)
+            this.functions.push({ start, end: end - 1, fd: null });
     }
 
     /**
@@ -1531,6 +1826,13 @@ class IndexWalker extends SemanticTimeTransitiveVisitor {
         this.imports.push({ at: off, imp });
         const ids = [...(imp.packages ?? []), imp.id!];
         this.qualified(off, ids, asDsymbol(m), null);
+        // a renamed import's name, before its `=` (the import's location is the module name's)
+        let eq = off;
+        while (eq > 0 && isSpace(this.bytes[eq - 1]!))
+            eq--;
+        const name = this.bytes[eq - 1] === 0x3d && imp.aliasId !== null ? identBefore(this.bytes, eq - 1) : -1;
+        if (name >= 0)
+            this.hitAt(name, imp, [identText(imp.aliasId)]);
         for (let i = 0; i < imp.names.length; i++) {
             const name = imp.names.opIndex(i);
             if (name === null)
@@ -1645,14 +1947,49 @@ function lookup(file: string, line: number, character: number, text: string):
         return miss("no identifier at the position");
     const pool = choose(m, ix, off);
     if (pool.length === 0) {
-        const sym = inCode(ix, off) ? fallback(m, ix, off, 0) : null;
-        if (sym === null)
+        const allowed = inCode(ix, off) && fallbackAllowed(bytes, off);
+        const sym = allowed ? fallback(m, ix, off, 0, foldedOperand(m, ix, off)) : null;
+        const args = sym === null && allowed ? templateArgument(m, ix, off) : [];
+        if (sym === null && args.length === 0)
             return miss("no symbol at the position");
-        pool.push({ sym, named: true, inst: null });
+        pool.push(...(sym !== null ? [{ sym, named: true, inst: null }] : args));
     }
     const hit = pool[0]!;
     const instances = hit.inst === null ? 0 : new Set(pool.filter((h) => h.inst !== null).map((h) => h.inst)).size;
     return { hit, instances, bytes, start: off };
+}
+
+/**
+ * What a template's parameter at `start` stands for, where the analysis left no node of it (its declaration in the
+ * parameter list, a `static if` condition, a template's argument, a field's type): the template declared in the file
+ * whose extent holds the token and whose parameters declare its name (`parameterAt`, the references' rule), in the
+ * instance whose analysed function holds the token, else its first instance; the argument of that instance's table
+ * (templatesem.d `argsym`), as a use with a node answers (`T value` answers the struct `T` stands for): an alias's
+ * target or its type's aggregate or enum, else the alias (a basic type's), a value parameter's constant; then the
+ * other instances' (the hover counts them). Empty when the template has no instance.
+ */
+function templateArgument(m: Module, ix: FileIndex, start: number): Hit[] {
+    const t = ix.bytes;
+    const word = utf8.decode(t.subarray(start, identEnd(t, start)));
+    const p = parameterAt(m, ix, start, word);
+    const id = Identifier.lookup(t.subarray(start, identEnd(t, start)));
+    if (p === null || id === null)
+        return [];
+    let here: TemplateInstance | null = null;
+    for (let s = scopeAt(m, ix, start); s !== null && here === null; s = s.parent) {
+        const ti = s.isTemplateInstance();
+        if (ti !== null && ti.tempdecl === p.td)
+            here = ti;
+    }
+    const all = instancesOf(p.td);
+    const hits: Hit[] = [];
+    for (const inst of here !== null ? [here, ...all.filter((x) => x !== here)] : all) {
+        const arg = inst.argsym?.symtab?.lookup(id) ?? null;
+        const al = arg?.isAliasDeclaration() ?? null;
+        if (arg !== null)
+            hits.push({ sym: (al !== null ? aliasTarget(al) ?? typeSymbol(al.type) : null) ?? arg, named: true, inst });
+    }
+    return hits;
 }
 
 /** The hits at `start` that may answer: the named ones, else those whose name the compiler did not make. */
@@ -1800,9 +2137,13 @@ const CHAIN_DEPTH = 8;
  * name inside a body), the identifier is looked up as written. After a `.`, in the symbol of the identifier before
  * it (its hits, else this fallback again): a scope's table (an enum's members, an aggregate's, a module's), a
  * variable's type's, an alias's target's. Otherwise `lookupLexical` from the innermost analysed function holding it.
- * An alias found is followed to its target (a selective import's alias to the imported symbol). Null when not found.
+ * An alias found is followed to its target (a selective import's alias to the imported symbol). Null when not found,
+ * and when it is a runtime variable (`foldable`) unless `anyVariable` (a built-in property's operand, `s.sizeof`; a
+ * name inside `typeof(...)`) or the analysis left a node of it there under another name (`resolvedNear`).
+ * In a body with errors (`erroneousBody`), where the walk met no node at all, a variable answers too: the lookup is
+ * then by position (`brokenBodyLookup`), outside the inactive branches and the words that are never symbols.
  */
-function fallback(m: Module, ix: FileIndex, start: number, depth: number): Dsymbol | null {
+function fallback(m: Module, ix: FileIndex, start: number, depth: number, anyVariable = false): Dsymbol | null {
     const t = ix.bytes;
     const id = Identifier.lookup(t.subarray(start, identEnd(t, start)));
     if (id === null || depth > CHAIN_DEPTH)
@@ -1810,21 +2151,114 @@ function fallback(m: Module, ix: FileIndex, start: number, depth: number): Dsymb
     let p = start;
     while (p > 0 && (t[p - 1] === 0x20 || t[p - 1] === 0x09 || t[p - 1] === 0x0a || t[p - 1] === 0x0d))
         p--;
+    const scope = scopeAt(m, ix, start);
+    const broken = erroneousBody(scope) && rangeHolding(inactiveOf(m, ix), start) < 0 && fallbackAllowed(t, start);
     let found: Dsymbol | null;
     if (p > 0 && t[p - 1] === 0x2e && t[p - 2] !== 0x2e) {
         const prev = identBefore(t, p - 1);
         if (prev < 0)
             return null;
-        const left = choose(m, ix, prev)[0]?.sym ?? fallback(m, ix, prev, depth + 1);
+        const left = choose(m, ix, prev)[0]?.sym ?? fallback(m, ix, prev, depth + 1, anyVariable);
         const container = left === null ? null : containerOf(left);
-        found = container?.symtab?.lookup(id) ?? null;
+        // a module's or a package's member: through its public imports, its package.d (`std.datetime.Clock`)
+        found = container === null ? null : container.isPackage() !== null
+            ? memberNamed({ kind: "scope", sds: container }, id) : container.symtab?.lookup(id) ?? null;
+    } else if (broken) {
+        found = brokenBodyLookup(m, ix, scope!.isFuncDeclaration()!, start, id);
     } else {
-        const scope = scopeAt(m, ix, start);
-        found = scope !== null ? lookupLexical(scope, id) : null;
+        found = scope !== null ? localImported(m, ix, start, id) ?? lookupLexical(scope, id) : null;
     }
     const alias = found?.isAliasDeclaration() ?? null;
     const sym = (alias !== null ? aliasTarget(alias) : null) ?? found;
-    return sym !== null && foldable(sym) ? sym : null;
+    // a plain import's name stands for its first package, as expressionsem.d `resolveIsPackage` makes it (`std` of
+    // `std.file.exists`); a renamed import's name is the import
+    const imp = sym?.isImport() ?? null;
+    if (imp !== null && imp.aliasId === null)
+        return imp.pkg;
+    return sym !== null && (broken || anyVariable || foldable(sym) || resolvedNear(m, ix, start, sym)) ? sym : null;
+}
+
+/**
+ * Whether the analysis left a node of `sym` at the identifier at `start`, or at one of the identifiers of the `.` chain
+ * before it, under another name (`choose` drops a hit whose name the compiler made and is not the token's): an alias's
+ * target, `__stdoutp` at `stdout`; a field reached through an alias, a Tuple's `__expand_field_0` for `st.terminated`,
+ * located at the chain's start. The compile resolved the name to `sym` there, a runtime variable included.
+ */
+function resolvedNear(m: Module, ix: FileIndex, start: number, sym: Dsymbol): boolean {
+    const t = ix.bytes;
+    for (let p = start, depth = 0; p >= 0 && depth <= CHAIN_DEPTH; depth++) {
+        if ((hitsOf(m, ix).get(p) ?? []).some((h) => h.sym === sym))
+            return true;
+        const dot = codeBefore(t, ix.nonCode, p) - 1;
+        if (t[dot] !== 0x2e || t[dot - 1] === 0x2e)
+            return false;
+        p = identBefore(t, codeBefore(t, ix.nonCode, dot));
+    }
+    return false;
+}
+
+/**
+ * Whether `scope` is a function whose analysis reported errors (`hasSemantic3Errors`, semantic3.d: the error count
+ * grew, or the body became an `ErrorStatement`). Only there does the analysis leave no node for an identifier it
+ * resolved or could resolve: an expression with an error becomes an `ErrorExp` (a `return` holding one keeps its
+ * statement), and a statement with an error an `ErrorStatement`, which its block then becomes (statementsem.d
+ * CompoundStatement), so one such error leaves the walk no node of the whole body. The editor's usual case: the
+ * function being typed. Gagged errors (a speculative instance, `__traits(compiles)`) do not count.
+ */
+function erroneousBody(scope: Dsymbol | null): boolean {
+    return scope?.isFuncDeclaration()?.hasSemantic3Errors ?? false;
+}
+
+/**
+ * `id` at byte `start` of a body with errors (`erroneousBody`), as completion finds a chain's first link there
+ * (`lookupFrom`: the function's locals by position, the name of several locals not resolved; a function-local import
+ * declared before). A name found outside the function's own locals and parameters is refused where the body's text
+ * could declare or open a scope the tables do not show, since the walk knows nothing of what the error dropped: the
+ * body declares the name (`declarations`: a nested function's parameter, a local of a block, a local declared after
+ * `start`), names it as a lambda's parameter (`lambdaParameter`), or holds a `with` statement. Null when not resolved.
+ */
+function brokenBodyLookup(m: Module, ix: FileIndex, fd: FuncDeclaration, start: number, id: Identifier):
+    Dsymbol | null {
+    const place: Place = { m, ix, off: start, scope: fd, edit: null, imports: localImports(ix, start),
+        firstHits: null };
+    const found = localImport(place, id) ?? lookupFrom(place, id);
+    if (found === null || typeof found === "string")
+        return null;
+    if (found.toParent2() === fd)
+        return found;
+    const body = ix.functions.find((f) => f.fd === fd);
+    if (body === undefined || declarations(place, fd, id) !== 0)
+        return null;
+    const name = identText(id);
+    const inBody = (p: number): boolean => p >= body.start && p < body.end;   // `occurrences` are in code
+    const hidden = occurrences(ix, name).some((p) => inBody(p) && lambdaParameter(ix, p, name.length, body.end))
+        || occurrences(ix, "with").some((p) => inBody(p) && ix.bytes[skipTrivia(ix.bytes, p + 4)] === 0x28);
+    return hidden ? null : found;
+}
+
+/**
+ * Whether the name of `length` bytes at `p` is a function literal's parameter written without a type: `x => ...`, or
+ * in the parenthesised list before a `=>` (`(a, x) => ...`). Searched up to `end`, the body's end.
+ */
+function lambdaParameter(ix: FileIndex, p: number, length: number, end: number): boolean {
+    const t = ix.bytes;
+    let q = skipTrivia(t, p + length);
+    if (t[q] === 0x3d && t[q + 1] === 0x3e)
+        return true;
+    if (t[q] !== 0x2c && t[q] !== 0x29)
+        return false;
+    for (let depth = 0; q < end; q++) {
+        const c = t[q];
+        if (c === 0x28)
+            depth++;
+        else if (c === 0x3b || c === 0x7b || c === 0x7d)
+            return false;
+        else if (c === 0x29 && depth-- === 0) {
+            const r = skipTrivia(t, q + 1);
+            return t[r] === 0x3d && t[r + 1] === 0x3e;
+        }
+    }
+    return false;
 }
 
 /**
@@ -1843,18 +2277,279 @@ function aliasTarget(al: AliasDeclaration): Dsymbol | null {
     return name !== null ? lookupLexical(asDsymbol(imp.mod), name) : null;
 }
 
-/** The scope whose table holds the members `sym.x` names: `sym` itself, a variable's type's, an alias's target's. */
+/** A module as the scope of a member lookup (`memberNamed`). */
+function moduleScope(mod: Module): Target {
+    return { kind: "scope", sds: asDsymbol(mod).isScopeDsymbol()! };
+}
+
+/**
+ * The symbol `id` names through the imports declared in the function bodies holding byte `off`, before it, the latest
+ * first (`localImports`; no symbol table of the function holds them): a renamed import's name (`import io =
+ * std.stdio;`) or a plain import's first package (`std` of `import std.file;`) is the import itself, as a module's
+ * table holds it (`fallback` answers a plain one as its package); a selective import's name its target; else a member
+ * of a plain import's module or of the modules it imports publicly (`searchModule`), visible from `m`. Null when none,
+ * or when two of those imports give different symbols (`single`).
+ */
+function localImported(m: Module, ix: FileIndex, off: number, id: Identifier): Dsymbol | null {
+    const imports = localImports(ix, off).reverse();
+    for (const imp of imports) {
+        if (imp.aliasId !== null ? imp.aliasId === id : imp.names.length === 0 && imp.ident === id)
+            return imp;
+        for (let i = 0; i < imp.names.length; i++) {
+            const name = imp.names.opIndex(i);
+            const alias = i < imp.aliases.length ? imp.aliases.opIndex(i) : null;
+            if ((alias ?? name) !== id)
+                continue;
+            const ad = i < imp.aliasdecls.length ? imp.aliasdecls.opIndex(i) : null;
+            return (ad !== null ? aliasTarget(ad) : null)
+                ?? (imp.mod !== null && name !== null ? memberNamed(moduleScope(imp.mod), name) : null);
+        }
+    }
+    const found: Dsymbol[] = [];
+    for (const imp of imports) {
+        if (imp.names.length === 0 && imp.aliasId === null && imp.mod !== null)
+            for (const c of searchModule(asDsymbol(imp.mod).isScopeDsymbol()!, id))
+                if (visibleFrom(asDsymbol(m).isScopeDsymbol()!, c))
+                    addDistinct(found, c);
+    }
+    return single(found);
+}
+
+/**
+ * The scope whose table holds the members `sym.x` names: `sym` itself, a variable's type's, an alias's target's, an
+ * import's module (renamed: `io.writeln`) or first package (`std.file.exists`).
+ */
 function containerOf(sym: Dsymbol): ScopeDsymbol | null {
     const sds = sym.isScopeDsymbol();
     if (sds !== null)
         return sds;
+    const imp = sym.isImport();
+    if (imp !== null)
+        return imp.aliasId !== null ? imp.mod !== null ? asDsymbol(imp.mod).isScopeDsymbol() : null : imp.pkg;
     const v = sym.isVarDeclaration();
-    if (v !== null)
-        return typeSymbol(v.type)?.isScopeDsymbol() ?? null;
+    if (v !== null)   // a pointer's target: `p.x` dereferences it
+        return typeSymbol(v.type?.ty === TY.Tpointer ? elementType(v.type) : v.type)?.isScopeDsymbol() ?? null;
     const al = sym.isAliasDeclaration();
     if (al !== null)
         return al.aliassym?.isScopeDsymbol() ?? typeSymbol(al.type)?.isScopeDsymbol() ?? null;
     return null;
+}
+
+/** The basic types a keyword names before a built-in property (`float.nan`, `uint.max`). */
+const BASIC_TYPES: ReadonlyMap<string, TY> = new Map([["byte", TY.Tint8], ["ubyte", TY.Tuns8], ["short", TY.Tint16],
+    ["ushort", TY.Tuns16], ["int", TY.Tint32], ["uint", TY.Tuns32], ["long", TY.Tint64], ["ulong", TY.Tuns64],
+    ["cent", TY.Tint128], ["ucent", TY.Tuns128], ["float", TY.Tfloat32], ["double", TY.Tfloat64], ["real", TY.Tfloat80],
+    ["ifloat", TY.Timaginary32], ["idouble", TY.Timaginary64], ["ireal", TY.Timaginary80], ["cfloat", TY.Tcomplex32],
+    ["cdouble", TY.Tcomplex64], ["creal", TY.Tcomplex80], ["bool", TY.Tbool], ["char", TY.Tchar],
+    ["wchar", TY.Twchar], ["dchar", TY.Tdchar]]);
+
+/**
+ * The `(` or `[` matching the `)` or `]` at `close`, comments and literals skipped; -1 when a `;`, `{` or `}` comes
+ * first (the statement's start) or the text's start.
+ */
+function openingOf(t: Uint8Array, nc: [number, number][], close: number): number {
+    const shut = t[close];
+    const open = shut === 0x29 ? 0x28 : 0x5b;
+    let depth = 0;
+    for (let p = close; p >= 0; p--) {
+        const k = rangeHolding(nc, p);
+        if (k >= 0) {
+            p = nc[k]![0];
+            continue;
+        }
+        const c = t[p];
+        if (c === shut)
+            depth++;
+        else if (c === open && --depth === 0)
+            return p;
+        else if (c === 0x3b || c === 0x7b || c === 0x7d)
+            return -1;
+    }
+    return -1;
+}
+
+/**
+ * What the operand of the `.` at `dot` gives, for a built-in property after it (BUILT-IN PROPERTIES in the header),
+ * read-only: a basic type's keyword its type, a string literal `string`; else the identifier that ends the operand
+ * (past the calls and indexes written after it, `f(x).length`, `row[0].length`, and a template's arguments,
+ * `to!string(x).length`): the symbol the index has there (in a template's code, the first instance's), else, outside
+ * the branches not chosen, the fallback's, a runtime variable included (`s.sizeof` leaves no node of `s`); then its
+ * value or type (`symbolTarget`), a function's return type (the overload resolved there; a property's too). Null when
+ * none.
+ */
+function operandBefore(m: Module, ix: FileIndex, dot: number): Target | null {
+    const t = ix.bytes;
+    const nc = ix.nonCode;
+    let q = codeBefore(t, nc, dot);
+    const ops: ("call" | "index")[] = [];
+    while (t[q - 1] === 0x29 || t[q - 1] === 0x5d) {
+        const open = openingOf(t, nc, q - 1);
+        if (open < 0)
+            return null;
+        const b = codeBefore(t, nc, open);
+        if (t[q - 1] === 0x29 && t[b - 1] === 0x21) {   // `name!(args)`: the template's arguments
+            q = codeBefore(t, nc, b - 1);
+            continue;
+        }
+        if (t[q - 1] === 0x29 && ops.length === 0 && groupingParen(t, open))
+            return groupedOperand(m, ix, open, q - 1);
+        ops.unshift(t[q - 1] === 0x29 ? "call" : "index");
+        q = b;
+    }
+    const literal = q > 0 ? rangeHolding(nc, q - 1) : -1;
+    if (literal >= 0)     // a string literal without a postfix (`"--port=".length`)
+        return ops.length === 0 && t[q - 1] === 0x22 && [0x22, 0x60, 0x72].includes(t[nc[literal]![0]]!)
+            ? { kind: "value", type: Type.tstring, mod: Type.tstring.mod } : null;
+    let s = identBefore(t, q);
+    if (s < 0)
+        return null;
+    let word = utf8.decode(t.subarray(s, q));
+    const bang = codeBefore(t, nc, s);
+    const name = t[bang - 1] === 0x21 ? identBefore(t, codeBefore(t, nc, bang - 1)) : -1;
+    if (name >= 0 && !KEYWORDS.has(utf8.decode(t.subarray(name, identEnd(t, name))))) {
+        s = name;    // `name!arg`: the template's name, its one argument skipped
+        word = utf8.decode(t.subarray(s, identEnd(t, s)));
+    }
+    const basic = ops.length === 0 ? BASIC_TYPES.get(word) : undefined;
+    if (basic !== undefined)
+        return Type.basic[basic] !== null ? { kind: "type", type: Type.basic[basic]! } : null;
+    if (KEYWORDS.has(word))
+        return null;
+    const inactive = inactiveOf(m, ix).some(([a, b]) => a <= s && s < b);
+    const sym = choose(m, ix, s)[0]?.sym ?? (inactive ? null : fallback(m, ix, s, 0, true));
+    if (sym === null)
+        return null;
+    const link: Link = { name: word, start: s, end: s + word.length, ops };
+    // a function: the overload the analysis resolved there returns it, called with or without parentheses
+    const fd = sym.isFuncDeclaration();
+    const next = fd !== null ? fd.type?.isTypeFunction()?.next ?? null : null;
+    const target = next !== null ? next.ty === TY.Tident ? "not inferred" : applyOps({ kind: "value", type: next,
+        mod: next.mod }, { ...link, ops: ops[0] === "call" ? ops.slice(1) : ops }) : symbolTarget(sym, link, 0);
+    return typeof target === "string" ? null : target;
+}
+
+/** A parenthesised operand that dereferences a name or a chain, `(*p)`, `(**a.b)`, `(x)`; its `*`s. */
+const DEREF_OPERAND = /^\s*(\**)\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*$/;
+
+/**
+ * What a parenthesised operand between `open` and `close` gives (`(*stList).length`), for `operandBefore`: a name or
+ * a chain, dereferenced by the `*`s before it (DEREF_OPERAND), each the target of a pointer value; null for another
+ * expression, or a `*` of something not a pointer.
+ */
+function groupedOperand(m: Module, ix: FileIndex, open: number, close: number): Target | null {
+    const form = DEREF_OPERAND.exec(utf8.decode(ix.bytes.subarray(open + 1, close)));
+    let target = form !== null ? operandBefore(m, ix, close) : null;
+    for (let n = form?.[1]!.length ?? 0; n > 0 && target !== null; n--) {
+        const next = target.kind === "value" && target.type.ty === TY.Tpointer ? elementType(target.type) : null;
+        target = next !== null ? { kind: "value", type: next, mod: next.mod } : null;
+    }
+    return target;
+}
+
+/**
+ * The built-in property named by the identifier at `start` (BUILT-IN PROPERTIES in the header): an identifier after
+ * a `.` that no symbol answers, one of the spec's properties of the operand's type (`builtins`, the completion's
+ * list); with the operand's value or type. Null when it is not one.
+ */
+function builtinAt(m: Module, ix: FileIndex, start: number): { target: Target & { type: Type }; item: CompletionItem }
+    | null {
+    const t = ix.bytes;
+    if (!inCode(ix, start))
+        return null;
+    const dot = codeBefore(t, ix.nonCode, start) - 1;
+    if (t[dot] !== 0x2e || t[dot - 1] === 0x2e)
+        return null;
+    const target = operandBefore(m, ix, dot);
+    if (target === null || target.kind === "scope")
+        return null;
+    const te = target.kind === "type" ? target.type.isTypeEnum() : null;
+    const ad = te === null ? aggregateOf(target.type) : null;
+    const valueEnum = target.kind === "value" ? target.type.isTypeEnum() : null;
+    const type = target.kind === "value" ? baseOf(target.type) : target.type;
+    const name = utf8.decode(t.subarray(start, identEnd(t, start)));
+    const item = builtins(type, ad, valueEnum !== null ? target.type : null).find((b) => b.label === name);
+    return item !== undefined ? { target, item } : null;
+}
+
+/**
+ * The hover of a name no symbol stands for, at `start`: a built-in property (`builtinAt`), kind `property`, its type
+ * and the operand's; a parameter named in a function or delegate type (`Notes.parameters`), kind `parameter`, as
+ * hdrgen prints it.
+ */
+function builtinHover(m: Module, ix: FileIndex, start: number): HoverAnswer | null {
+    const range = identRange(ix.bytes, start);
+    const p = typeParameterAt(m, ix, start);
+    if (p !== null) {
+        const name = identText(p.param.ident);
+        const markdown = `*parameter* \`${name}\`\n\n\`\`\`d\n${str(parameterToChars(p.param, p.tf, false))}\n\`\`\``;
+        return { result: { kind: "parameter", name, markdown, range } };
+    }
+    const b = builtinAt(m, ix, start);
+    if (b === null)
+        return null;
+    const { label, detail } = b.item;
+    const code = detail === "" ? label : detail.includes("(") ? detail : `${detail} ${label}`;
+    const markdown = `*property* \`${label}\` of \`${str(b.target.type.toChars())}\`\n\n\`\`\`d\n${code}\n\`\`\``;
+    return { result: { kind: "property", name: label, markdown, range } };
+}
+
+/** The parameter named at `start` in a function or delegate type written in a declaration, else null. */
+function typeParameterAt(m: Module, ix: FileIndex, start: number): { param: Parameter; tf: TypeFunction } | null {
+    hitsOf(m, ix);
+    return ix.notes?.parameters.get(start) ?? null;
+}
+
+/** The properties that fold their operand away whatever it is: a runtime variable before them leaves no node. */
+const FOLDING_PROPERTIES: ReadonlySet<string> = new Set(["sizeof", "alignof", "mangleof", "stringof"]);
+
+/**
+ * Whether the identifier at `start` is the operand of a property that folds it away (`addr.sizeof`), or inside the
+ * parentheses of a `typeof` (`is(typeof(cl.flag) : bool)`: the analysis keeps only the type), outside the branches not
+ * chosen: the fallback may then answer with a runtime variable, and a member after it.
+ */
+function foldedOperand(m: Module, ix: FileIndex, start: number): boolean {
+    const t = ix.bytes;
+    const dot = skipTrivia(t, identEnd(t, start));
+    const p = t[dot] === 0x2e && t[dot + 1] !== 0x2e ? skipTrivia(t, dot + 1) : -1;
+    return (p >= 0 && FOLDING_PROPERTIES.has(utf8.decode(t.subarray(p, identEnd(t, p)))) || inTypeof(ix, start))
+        && !inactiveOf(m, ix).some(([a, b]) => a <= start && start < b);
+}
+
+/** How far back from a name its enclosing `typeof(` is searched. */
+const TYPEOF_WINDOW = 1024;
+
+/** Whether byte `start` is inside a `typeof`'s parentheses, within its statement (comments and literals skipped). */
+function inTypeof(ix: FileIndex, start: number): boolean {
+    const t = ix.bytes;
+    let depth = 0;
+    for (let p = start - 1; p >= 0 && p > start - TYPEOF_WINDOW; p--) {
+        const k = rangeHolding(ix.nonCode, p);
+        if (k >= 0) {
+            p = ix.nonCode[k]![0];
+            continue;
+        }
+        const c = t[p];
+        if (c === 0x3b || c === 0x7b || c === 0x7d)
+            return false;
+        if (c === 0x29)
+            depth++;
+        else if (c === 0x28 && depth-- === 0) {
+            depth = 0;
+            const w = identBefore(t, codeBefore(t, ix.nonCode, p));
+            if (w >= 0 && wordAt(t, w) === "typeof")
+                return true;
+        }
+    }
+    return false;
+}
+
+/** The start of the identifier holding byte `off`, or ending just before it (a cursor after it). */
+function identStartAt(t: Uint8Array, off: number): number {
+    if (!isIdentByte(t[off]) && off > 0 && isIdentByte(t[off - 1]))
+        off--;
+    while (off > 0 && isIdentByte(t[off - 1]))
+        off--;
+    return off;
 }
 
 /**
@@ -1880,6 +2575,10 @@ function hover(file: string, line: number, character: number, text: string): Hov
     }
     const r = lookup(file, line, character, text);
     if ("reason" in r) {
+        const builtin = r.reason === "no symbol at the position" && off !== null
+            ? builtinHover(m0!, ix0!, identStartAt(ix0!.bytes, off)) : null;
+        if (builtin !== null)
+            return builtin;
         const lowering = r.reason === "no identifier at the position" || r.reason === "no symbol at the position";
         return (lowering && off !== null ? resolvedHover(m0!, ix0!, off) : null) ?? r;
     }
@@ -1914,7 +2613,9 @@ function hover(file: string, line: number, character: number, text: string): Hov
 /**
  * The declaration of the symbol at (line, character) of `file` (see `queryHover` for the arguments and the misses):
  * the declaring file as the compiler names it and the range of the declaration's identifier; a module's file at its
- * start. More misses: a symbol without a source location (a builtin, `Loc.initial`), one declared in a string mixin.
+ * start; a symbol declared in a string mixin, its name inside the mixin's literal, else the `mixin` keyword
+ * (`mixinSite`). More misses: a symbol without a source location (a builtin, `Loc.initial`), one declared in a string
+ * mixin that `mixinSite` cannot place (a string built elsewhere, on a line of several mixins).
  */
 export function queryDefinition(file: string, line: number, character: number, text: string): DefinitionAnswer {
     return printing(() => definition(file, line, character, text));
@@ -1922,10 +2623,60 @@ export function queryDefinition(file: string, line: number, character: number, t
 
 function definition(file: string, line: number, character: number, text: string): DefinitionAnswer {
     const r = lookup(file, line, character, text);
-    if ("reason" in r)
-        return r;
+    if ("reason" in r) {
+        const m = r.reason === "no symbol at the position" ? moduleOf(file) : null;
+        const ix = m !== null ? indexOf(m) : null;
+        const off = ix !== null ? byteOffset(ix.bytes, line, character) : null;
+        if (off === null)
+            return r;
+        const start = identStartAt(ix!.bytes, off);
+        const p = typeParameterAt(m!, ix!, start);
+        if (p !== null)     // the parameter's own name: its declaration
+            return { result: { name: identText(p.param.ident), file: str(m!.srcfile.toChars()),
+                range: identRange(ix!.bytes, start) } };
+        return builtinAt(m!, ix!, start) !== null ? miss("a built-in property has no declaration") : r;
+    }
+    const name = str(r.hit.sym.toPrettyChars());
     const d = declarationOf(r.hit.sym);
-    return typeof d === "string" ? miss(d) : { result: { name: str(r.hit.sym.toPrettyChars()), ...d } };
+    if (typeof d !== "string")
+        return { result: { name, ...d } };
+    const site = mixinSite(r.hit.sym);
+    return site === null ? miss(d) : { result: { name, file: site.file, range: site.range } };
+}
+
+/**
+ * Where a symbol declared in a string mixin is written in the source, for `queryDefinition` and `queryReferences`:
+ * its location's file `<file>-mixin-<line>` (dsymbolsem.d `adjustLocForMixin`) names the line of the `mixin (`; of
+ * the keywords starting a statement there, the one whose lone literal argument holds the very bytes the mixin parsed
+ * (no escape sequence decoded) gives the declaration's identifier inside the literal (`named`); else, when the line
+ * has one such keyword, the keyword (the outline's selection). Null when neither: a mixed-in string built elsewhere
+ * (`mixin(code)`) on a line of several mixins, or a location that is no mixin's.
+ */
+function mixinSite(sym: Dsymbol): (DeclarationSite & { named: boolean }) | null {
+    if (!sym.loc.isValid() || sym.loc.filename() === null)
+        return null;
+    const sl = sym.loc.toSourceLoc();
+    const parts = /^(.*)-mixin-(\d+)$/s.exec(str(sl.filename));
+    const m = parts !== null ? moduleOf(parts[1]!) : null;
+    if (m === null)
+        return null;
+    const file = parts![1]!;
+    const ix = indexOf(m);
+    const t = ix.bytes;
+    const nc = ix.hits !== null ? ix.nonCode : nonCode(t);
+    const keywords = mixinKeywords(t, nc, Number(parts![2]) - 1);
+    const parsed = sl.fileContent;
+    const k = sl.fileOffset < parsed.length ? keyAt(parsed, sl.fileOffset, namesOf(sym)) : null;
+    for (const at of k !== null ? keywords : []) {
+        const a = mixinArgument(t, nc, at);
+        const n = a !== null ? a.end - a.start : -1;
+        // an escape sequence makes the parsed text shorter than the literal: equal bytes mean none
+        if (a === null || n > parsed.length || (n < parsed.length && parsed[n] !== 0)
+            || !t.subarray(a.start, a.end).every((b, i) => b === parsed[i]))
+            continue;
+        return { file, range: identRange(t, a.start + k!.start), named: true };
+    }
+    return keywords.length === 1 ? { file, range: identRange(t, keywords[0]!), named: false } : null;
 }
 
 /**
@@ -3300,23 +4051,37 @@ function mixinKeywords(t: Uint8Array, nc: [number, number][], line: number): num
 }
 
 /**
- * The string a `mixin (` at `at` mixes in when its argument is one literal alone (`mixin("s += 1;")`), as the parser
- * read it (simple escapes decoded); else null.
+ * The bytes between the delimiters of the one literal a `mixin (` at `at` takes as its whole argument (`"..."`,
+ * `r"..."`, `` `...` ``, `q{...}`), and whether it is a `"..."`, whose escape sequences the lexer decodes; else null
+ * (another argument, or a delimited or hex string).
  */
-function mixinLiteral(t: Uint8Array, nc: [number, number][], at: number): string | null {
+function mixinArgument(t: Uint8Array, nc: [number, number][], at: number):
+    { start: number; end: number; escapes: boolean } | null {
     const p = skipTrivia(t, skipTrivia(t, at + 5) + 1);
     const k = rangeHolding(nc, p);
     if (k < 0 || nc[k]![0] !== p || t[skipTrivia(t, nc[k]![1])] !== 0x29)
         return null;
-    const raw = utf8.decode(t.subarray(p, nc[k]![1]));
-    if (raw.startsWith("`") || raw.startsWith("r\""))
-        return raw.slice(raw.indexOf(raw.startsWith("`") ? "`" : "\"") + 1, -1);
-    if (raw.startsWith("q{"))
-        return raw.slice(2, -1);
-    if (!raw.startsWith("\""))
+    const end = nc[k]![1] - 1;
+    if (t[p] === 0x60 || t[p] === 0x22)
+        return { start: p + 1, end, escapes: t[p] === 0x22 };
+    if ((t[p] === 0x72 && t[p + 1] === 0x22) || (t[p] === 0x71 && t[p + 1] === 0x7b))
+        return { start: p + 2, end, escapes: false };
+    return null;
+}
+
+/**
+ * The string a `mixin (` at `at` mixes in when its argument is one literal alone (`mixin("s += 1;")`), as the parser
+ * read it (simple escapes decoded); else null.
+ */
+function mixinLiteral(t: Uint8Array, nc: [number, number][], at: number): string | null {
+    const a = mixinArgument(t, nc, at);
+    if (a === null)
         return null;
+    const raw = utf8.decode(t.subarray(a.start, a.end));
+    if (!a.escapes)
+        return raw;
     try {
-        return JSON.parse(raw) as string;
+        return JSON.parse(`"${raw}"`) as string;
     } catch {
         return null;
     }
@@ -4202,9 +4967,9 @@ function cyclesOf(edges: readonly number[][]): (number | null)[] {
 export type CompletionKind = "method" | "function" | "field" | "property" | "variable" | "constant" | "enumMember"
     | "enum" | "struct" | "class" | "interface" | "module" | "typeParameter";
 
-/** One name after a `.` (COMPLETION in the header). */
+/** One name after a `.`, or visible where no `.` precedes the position (COMPLETION in the header). */
 export interface CompletionItem {
-    /** The member's name as written after the dot. */
+    /** The name as written. */
     label: string;
     kind: CompletionKind;
     /**
@@ -4215,15 +4980,22 @@ export interface CompletionItem {
     detail: string;
     /** The doc comment's summary on one line, "" when none. */
     documentation: string;
-    /** The group, for the editor's order: members of the type (0), UFCS candidates (1), built-in properties (2). */
-    group: 0 | 1 | 2;
+    /**
+     * The group, for the editor's order. After a dot: members of the type (0), UFCS candidates (1), built-in
+     * properties (2). Without one: locals and parameters (0), the enclosing aggregate's members (1), the module's (2),
+     * the imported modules' (3).
+     */
+    group: CompletionGroup;
 }
 
-/** The names after a `.`, sorted by group, then label. */
+/** A completion item's group (`CompletionItem.group`). */
+export type CompletionGroup = 0 | 1 | 2 | 3;
+
+/** The names after a `.`, or in scope without one, sorted by group, then label. */
 export interface CompletionResult {
     /**
-     * The text the items replace, in the REQUEST's text: the identifier characters typed after the dot up to the
-     * position (empty when the position is right after the dot).
+     * The text the items replace, in the REQUEST's text: the identifier characters typed up to the position, after the
+     * dot or not (empty when the position is right after the dot, or nothing is typed).
      */
     range: QueryRange;
     items: CompletionItem[];
@@ -4287,24 +5059,29 @@ const FLOATING: ReadonlySet<TY> = new Set([TY.Tfloat32, TY.Tfloat64, TY.Tfloat80
 const RECEIVER_MODS = MODFlags.const_ | MODFlags.immutable_ | MODFlags.wild | MODFlags.shared_;
 
 /**
- * The names visible after `expr.` at `position` of `file`, whose editor text is `text`, from the last compile,
- * read-only (THE CONTRACT; COMPLETION in the header). Unlike the other queries a text that differs from the compiled
- * one is not a miss: the expression before the dot is read from `text`, and its scope is found at the dot's position
- * moved into the compiled text (the common prefix and suffix of the two texts; a position inside the changed span goes
- * to the span's start), `moved` then true. `expr` is an identifier chain (`a.b.c`, across lines and comments; `this`
+ * The names visible after `expr.` at `position` of `file`, whose editor text is `text`, or, with no `.` before the
+ * identifier being typed there, the names in scope at it, from the last compile, read-only (THE CONTRACT; COMPLETION
+ * in the header). Unlike the other queries a text that differs from the compiled one is not a miss: the expression
+ * before the dot is read from `text`, and its scope is found at the dot's position moved into the compiled text (the
+ * common prefix and suffix of the two texts; a position inside the changed span goes to the span's start), `moved`
+ * then true. `expr` is an identifier chain (`a.b.c`, across lines and comments; `this`
  * or `super` first; a leading `.` for the module scope; a link may end in `()`, a function's return type, or `[...]`,
  * an element's). The items: the members of what it names (group 0), the UFCS candidates the index knows (1), the
- * built-in properties (2), one per name, sorted by group then label.
- * Misses: the file is not in the last compile; the position is outside `text`; no `.` before the position (after the
- * identifier characters being typed); the dot is in a comment or a literal, or after a number; the function holding
- * the moved position was not analysed; the expression is not resolved (never a guess: the reason names the link), or
- * a template's analysed instances resolve it to different types.
+ * built-in properties (2), one per name, sorted by group then label. Without a dot: the locals and parameters declared
+ * before the position (0), the enclosing aggregate's members (1), the module's names (2), the imported modules' public
+ * names (3).
+ * Misses: the file is not in the last compile; the position is outside `text`; the dot, or without one the position,
+ * in a comment or a literal; the dot after a number, the position in one; the function holding the moved position not
+ * analysed; the expression not resolved (never a guess: the reason names the link), or a template's analysed
+ * instances resolving it to different types.
  * Cost: the first request after a compile builds the file's index (as every query); then the request text's scan
  * (its comments and literals, the move), the chain's resolution, a few table lookups per link, once per analysed copy
  * of the scope (in a template's body, one per instance, stopping at the first disagreement; what the copies share,
  * the hits at the first link and the local imports, is found once), and the items, each printed through the hover's
  * printer. A large application module under -i: see the header; inside std.format's heavily instantiated `getNth` body
- * ~5 ms; every `.` of the compile's 349 files, 138767 requests: none over 71 ms (an index build).
+ * ~5 ms; every `.` of the compile's 349 files, 138767 requests: none over 71 ms (an index build). Without a dot, the
+ * first request after a compile prints the items of the imported modules' names (that module under -i: ~1500 items,
+ * ~80 ms at a load of 25 besides the index), the later ones filter the kept entries (~2-10 ms).
  */
 export function queryCompletion(file: string, text: string, position: QueryPosition): CompletionAnswer {
     return printing(() => completion(file, text, position));
@@ -4325,9 +5102,9 @@ function completion(file: string, text: string, position: QueryPosition): Comple
     while (typed > 0 && isIdentByte(t[typed - 1]))
         typed--;
     const dot = typed - 1;
-    if (dot < 0 || t[dot] !== 0x2e || t[dot - 1] === 0x2e)
-        return miss("no `.` before the position");
     const nc = moved ? nonCode(t) : ix.nonCode;
+    if (dot < 0 || t[dot] !== 0x2e || t[dot - 1] === 0x2e)
+        return scopeCompletion(m, ix, t, nc, typed, off, position);
     if (rangeHolding(nc, dot) >= 0)
         return miss("the `.` is in a comment or a literal");
     let word = dot;
@@ -4372,6 +5149,222 @@ function completion(file: string, text: string, position: QueryPosition): Comple
     const items = completionItems(found!.place, found!.target);
     items.sort((a, b) => a.group - b.group || compareText(a.label, b.label));
     return { result: { range: { start: positionOf(t, typed), end: position }, items, moved } };
+}
+
+/**
+ * The names visible at the identifier being typed from `typed` to `off` (byte offsets in the request's text `t`, whose
+ * comments and literals are `nc`; `off` is `position`): COMPLETION without a dot. The scope is found as after a dot
+ * (the position moved into the compiled text; the innermost analysed function there, of a template's instances the
+ * first, else the module), and the names are those of `scopeItems`. Misses: the position is in a comment or a literal,
+ * or in a number; the function at the moved position was not analysed.
+ */
+function scopeCompletion(m: Module, ix: FileIndex, t: Uint8Array, nc: [number, number][], typed: number, off: number,
+    position: QueryPosition): CompletionAnswer {
+    if (inCommentOrLiteral(t, nc, typed))
+        return miss("the position is in a comment or a literal");
+    if (typed < off && t[typed]! >= 0x30 && t[typed]! <= 0x39)
+        return miss("the position is in a number");
+    const moved = t !== ix.bytes;
+    const edit = moved ? editOf(t, ix.bytes) : null;
+    const at = edit === null ? typed : movedOffset(edit, t.length, typed);
+    const scopes = scopesAt(m, ix, at);
+    if (scopes === null)
+        return miss("the function at the position was not analysed");
+    const place: Place = { m, ix, off: at, scope: scopes[0]!, edit, imports: localImports(ix, at), firstHits: null };
+    const items = scopeItems(place);
+    items.sort((a, b) => a.group - b.group || compareText(a.label, b.label));
+    return { result: { range: { start: positionOf(t, typed), end: position }, items, moved } };
+}
+
+/**
+ * Whether byte `p` of `t` is inside a comment or a literal of `nc` (`nonCode`, whose comment ranges run on over the
+ * whitespace after them): past a literal's opening and before its end; in a `//` comment before its line's end; in a
+ * block comment before its closing token.
+ */
+function inCommentOrLiteral(t: Uint8Array, nc: [number, number][], p: number): boolean {
+    const k = rangeHolding(nc, p > 0 ? p - 1 : p);
+    if (k < 0)
+        return false;
+    const [a, b] = nc[k]!;
+    if (t[a] !== 0x2f || (t[a + 1] !== 0x2f && t[a + 1] !== 0x2a && t[a + 1] !== 0x2b))
+        return p > a && p < b;
+    if (t[a + 1] === 0x2f)
+        return !t.subarray(a, p).includes(0x0a);
+    let e = b;
+    while (e > a && isSpace(t[e - 1]!))
+        e--;
+    return p < e;
+}
+
+/**
+ * The names visible at a place, for a completion without a dot (COMPLETION in the header), one item per name, the
+ * innermost declaration winning: group 0, the locals and parameters of the functions holding the place (a nested
+ * function's, then its enclosing ones'), declared before it in a block still open there (`openAt`), and the parameters
+ * of a template instance holding it, the function-local renamed imports before it; group 1, the members of the
+ * aggregate whose member function holds it (`this`'s, filtered by its qualifier as after `this.`, its `alias this`'s; a
+ * static member function's static members); group 2, the module's own members and the names its imports declare (`std`
+ * of `import std.stdio;`, a renamed import's); group 3, the public members of the modules it imports, their public
+ * imports followed, and of the function-local imports before the place (a selective import's names). Not the keywords
+ * (the grammar's), nor the compiler's names. Each item as after a dot (`completionItem`), its overloads counted; the
+ * items of a module's table are printed once per compile (`moduleItems`).
+ */
+function scopeItems(place: Place): CompletionItem[] {
+    const items = new Map<string, CompletionItem>();
+    const add = (sym: Dsymbol, group: CompletionGroup): void => {
+        const label = identText(sym.ident);
+        if (!items.has(label))
+            items.set(label, completionItem(sym, label, group, sym, true));
+    };
+    let ad: AggregateDeclaration | null = null;
+    for (let s: Dsymbol | null = place.scope; s !== null && s.isModule() === null; s = s.parent) {
+        const fd = s.isFuncDeclaration();
+        if (fd !== null) {
+            for (const v of localsBefore(place, fd))
+                add(v, 0);
+        }
+        for (const [, p] of s.isTemplateInstance()?.argsym?.symtab?.tab.asRange() ?? [])
+            add(p, 0);
+        ad ??= s.isAggregateDeclaration();
+    }
+    for (const imp of place.imports) {
+        if (imp.aliasId !== null)
+            add(imp, 0);    // `import io = std.stdio;` in a body: `io` is a name of the function's scope
+    }
+    if (ad !== null) {
+        const self = thisOf(place.scope);
+        const instance = self !== null && self.isThis() === ad;
+        const mod = instance ? (self!.type?.mod ?? 0) & RECEIVER_MODS : 0;
+        const member = (s: Dsymbol): void => {
+            if (listable(s) && accessible(s, place) && (instance ? callableOn(s, mod) : isStaticMember(s)))
+                add(s, 1);
+        };
+        aggregateMembers(ad, member);
+        const through = instance ? aliasThisType(ad) : null;
+        const inner = through !== null ? aggregateOf(through) : null;
+        if (inner !== null)
+            aggregateMembers(inner, (s) => {
+                if (listable(s) && accessible(s, place) && callableOn(s, mod))
+                    add(s, 1);
+            });
+    }
+    const own = asDsymbol(place.m).isScopeDsymbol()!;
+    for (const e of moduleItems(own)) {
+        if ((listable(e.sym) || e.sym.isImport() !== null) && !items.has(e.label))
+            items.set(e.label, { ...itemOf(e), group: 2 });
+    }
+    const imported = (sds: ScopeDsymbol): void => {
+        for (const e of moduleItems(sds)) {
+            if (listable(e.sym) && e.sym.isPackage() === null && accessible(e.sym, place) && !items.has(e.label))
+                items.set(e.label, itemOf(e));
+        }
+    };
+    const seen = new Set<ScopeDsymbol>([own]);
+    const visit = (sds: ScopeDsymbol, all: boolean): void => {
+        (sds.importedScopes?.opSlice() ?? []).forEach((x, i) => {
+            const mod = x?.isModule() ?? null;
+            const next = mod !== null ? asDsymbol(mod).isScopeDsymbol() : null;
+            if (next === null || seen.has(next) || !(all || sds.visibilities?.[i] === Visibility.Kind.public_))
+                return;
+            seen.add(next);
+            imported(next);
+            visit(next, false);
+        });
+    };
+    visit(own, true);
+    for (const imp of place.imports) {
+        const sds = imp.mod !== null ? asDsymbol(imp.mod).isScopeDsymbol() : null;
+        if (sds !== null && imp.aliasId === null && imp.names.length === 0 && !seen.has(sds)) {
+            seen.add(sds);
+            imported(sds);
+            visit(sds, false);
+        }
+        for (const al of imp.aliasdecls.opSlice())
+            if (al !== null)
+                add(al, 3);
+    }
+    return [...items.values()];
+}
+
+/**
+ * The locals and parameters of `fd` visible at the place, latest declaration first: those the walk met (at their
+ * names) and those of the function's table it did not (a body with errors; nested functions and aggregates), at their
+ * own locations, declared before the place, in a block or a statement head still open there (`openAt`); parameters
+ * always. Compiler-made names left out.
+ */
+function localsBefore(place: Place, fd: FuncDeclaration): Dsymbol[] {
+    const found = new Map<Dsymbol, number>();
+    for (const l of localsOf(place.ix, fd))
+        found.set(l.v, l.at);
+    for (const [, s] of fd.localsymtab?.tab.asRange() ?? []) {
+        const at = found.has(s) ? null : localOffset(place, s);
+        if (at !== null)
+            found.set(s, at);
+    }
+    for (const p of fd.parameters?.opSlice() ?? [])
+        if (p !== null && !found.has(p))
+            found.set(p, -1);
+    return [...found].filter(([s, at]) => !isCompilerName(s) && at < place.off
+        && (s.isVarDeclaration()?.isParameter() === true || at < 0 || openAt(place.ix, at, place.off)))
+        .sort((a, b) => b[1] - a[1]).map(([s]) => s);
+}
+
+/**
+ * Whether a declaration at byte `at` of the compiled text is still in scope at `off` (after it), on the text: no block
+ * opened before it closes in between; a declaration inside parentheses (`foreach (x; ...)`, `if (auto x = ...)`,
+ * `catch (E e)`) only within the statement that follows them (`statementEnd`).
+ */
+function openAt(ix: FileIndex, at: number, off: number): boolean {
+    const t = ix.bytes;
+    let braces = 0;
+    let parens = 0;
+    let open = true;
+    scanCode(t, ix.nonCode, at, (c, q) => {
+        if (q >= off)
+            return true;
+        if (c === 0x7b) {
+            braces++;
+        } else if (c === 0x7d && --braces < 0) {
+            open = false;
+            return true;
+        } else if (c === 0x28) {
+            parens++;
+        } else if (c === 0x29 && --parens < 0) {
+            open = off < statementEnd(t, ix.nonCode, q + 1);
+            return true;
+        }
+        return false;
+    });
+    return open;
+}
+
+/** An entry of a module's table for a completion without a dot, its item printed at its first need (`moduleItems`). */
+interface ModuleEntry {
+    sym: Dsymbol;
+    label: string;
+    item: CompletionItem | null;
+}
+
+/**
+ * Every entry of a module's table but the compiler's names, kept for the compile (`moduleItemCache`, emptied by
+ * `dropQueryIndex`): a module's names and their items do not depend on where the completion is. The caller checks the
+ * visibility and prints an entry's item once (`itemOf`).
+ */
+function moduleItems(sds: ScopeDsymbol): readonly ModuleEntry[] {
+    let list = moduleItemCache.get(sds);
+    if (list === undefined) {
+        list = [];
+        for (const [, sym] of sds.symtab?.tab.asRange() ?? []) {
+            if (sym.ident !== null && !isCompilerName(sym))
+                list.push({ sym, label: identText(sym.ident), item: null });
+        }
+        moduleItemCache.set(sds, list);
+    }
+    return list;
+}
+
+/** A module entry's item in group 3 (`completionItem`), printed at the first need and kept with the entry. */
+function itemOf(e: ModuleEntry): CompletionItem {
+    return e.item ??= completionItem(e.sym, e.label, 3, e.sym, true);
 }
 
 /** The request's text `from` and the compiled `to` as one edit apart (`Edit`). */
@@ -4789,8 +5782,8 @@ function baseOf(type: Type): Type {
 
 /**
  * The member `id` after the `.` of `target`: a scope's table entry (a package's submodule, else its package.d's
- * member; a module's public imports' members), an aggregate's member (through `alias this` for a value), an enum's
- * member.
+ * member; a module's own member, else what its imports that are not private give, `searchModule`: null when two give
+ * different symbols), an aggregate's member (through `alias this` for a value), an enum's member.
  */
 function memberNamed(target: Target, id: Identifier): Dsymbol | null {
     if (target.kind === "scope") {
@@ -4798,12 +5791,7 @@ function memberNamed(target: Target, id: Identifier): Dsymbol | null {
         if (sub !== null)
             return sub;
         const m = scopeModule(target.sds);
-        for (const s of m !== null ? exportingModules(m) : []) {
-            const found = s.symtab?.lookup(id) ?? null;
-            if (found !== null)
-                return found;
-        }
-        return null;
+        return m !== null ? single(searchModule(m, id)) : null;
     }
     const te = target.kind === "type" ? target.type.isTypeEnum() : null;
     if (te !== null)
@@ -4928,7 +5916,7 @@ function completionItems(place: Place, target: Target): CompletionItem[] {
     const add = (sym: Dsymbol, group: 0 | 1, detailOf: Dsymbol = sym): void => {
         const label = identText(sym.ident);
         if (!items.has(label))
-            items.set(label, completionItem(sym, label, group, detailOf));
+            items.set(label, completionItem(sym, label, group, detailOf, group === 0));
     };
     if (target.kind === "scope") {
         if (target.sds.isModule() === null) {
@@ -5112,15 +6100,15 @@ function derives(cd: ClassDeclaration, base: ClassDeclaration): boolean {
  * A table entry as an item: its kind, the hover's signature on one line, the doc comment's summary as dmd's section
  * split gives it (`DocComment.parse`, the hover's), on one line.
  */
-function completionItem(sym: Dsymbol, label: string, group: 0 | 1, detailOf: Dsymbol): CompletionItem {
+function completionItem(sym: Dsymbol, label: string, group: CompletionGroup, detailOf: Dsymbol, counted: boolean):
+    CompletionItem {
     const fd = detailOf.isFuncDeclaration();
-    const overloads = fd !== null && group === 0 ? overloadCount(fd) - 1 : 0;
+    const overloads = fd !== null && counted ? overloadCount(fd) - 1 : 0;
     const signature = withContext(contextOf(detailOf), () => signatureOf(detailOf)).replace(/\s*\n\s*/g, " ");
-    const owner = docOf(sym) !== null ? sym : detailOf;
-    const doc = docOf(owner);
-    const summary = doc === null ? null : DocComment.parse(owner, doc).summary;
+    // the overload the item shows (a UFCS candidate's, the one taking the receiver) has the first say
+    const own = summaryOf(detailOf);
     return { label, kind: completionKind(sym), detail: overloads > 0 ? `${signature} (+${overloads} overloads)`
-        : signature, documentation: simplifyMacros(str(summary?.body_ ?? null).replace(/\s+/g, " ").trim()), group };
+        : signature, documentation: own !== "" || detailOf === sym ? own : summaryOf(sym), group };
 }
 
 /**
@@ -5323,6 +6311,8 @@ interface Resolution {
     text: () => string;
     inst: TemplateInstance | null;
     temporaries: boolean;
+    /** The function a lowering calls (an operator's overload, `opApply`), whose doc summary follows the part. */
+    called: FuncDeclaration | null;
 }
 
 /** A temporary the compiler named (`__r12`, `__key38`, `__tmpfordtor4`): genIdent's names end with a number. */
@@ -5568,12 +6558,12 @@ function resolvedOf(m: Module, ix: FileIndex): Map<number, Resolution[]> {
     const t = ix.bytes;
     const map = new Map<number, Resolution[]>();
     const add = (start: number, end: number, label: string, print: () => string, inst: TemplateInstance | null,
-        temporaries = false) => {
+        temporaries = false, called: FuncDeclaration | null = null) => {
         const list = map.get(start) ?? [];
         let printed: string | null = null;
         const text = (): string => (printed ??= print());
         if (!list.some((r) => r.label === label && r.inst === inst))
-            list.push({ start, end, label, text, inst, temporaries });
+            list.push({ start, end, label, text, inst, temporaries, called });
         map.set(start, list);
     };
     /** The member access of an `alias this` access: itself, or the access a call to an `alias this` function calls. */
@@ -5622,8 +6612,9 @@ function resolvedOf(m: Module, ix: FileIndex): Map<number, Resolution[]> {
         const ce = e.isCallExp();
         if (ce === null) {   // a comparison or a negation around an operator's call, at the operator
             const end = operatorEnd(t, n.at);
+            const inner = (e.isNotExp()?.e1 ?? (e as CmpExp).e1)?.isCallExp()?.f ?? null;
             if (end >= 0)
-                add(n.at, end, LOWERED, () => loweredText(e), n.inst);
+                add(n.at, end, LOWERED, () => loweredText(e), n.inst, false, inner);
             continue;
         }
         const fd = ce.f!;
@@ -5632,18 +6623,18 @@ function resolvedOf(m: Module, ix: FileIndex): Map<number, Resolution[]> {
             const word = wordAt(t, n.at);
             const loop = word === "foreach" || word === "foreach_reverse";
             if ((name === "opApply" || name === "opApplyReverse") && loop) {
-                add(n.at, n.at + word.length, LOWERED, () => opApplyText(ce), n.inst);
+                add(n.at, n.at + word.length, LOWERED, () => opApplyText(ce), n.inst, false, fd);
                 continue;
             }
             if (LOCATED_AT_OBJECT.has(name)) {
                 const op = operatorAtObject(t, ix.nonCode, ce, name, n.object);
                 if (op !== null)
-                    add(op[0], op[1], LOWERED, () => loweredText(ce), n.inst);
+                    add(op[0], op[1], LOWERED, () => loweredText(ce), n.inst, false, fd);
                 continue;
             }
             const end = operatorEnd(t, n.at);
             if (end >= 0 && t[n.at] !== 0x28) {
-                add(n.at, end, LOWERED, () => loweredText(ce), n.inst);
+                add(n.at, end, LOWERED, () => loweredText(ce), n.inst, false, fd);
                 continue;
             }
         }
@@ -5670,7 +6661,10 @@ function resolvedSection(m: Module, ix: FileIndex, off: number, list: readonly R
     // the context of `spellFresh`: the function the token is in, the instance whose copy the parts print
     const fn = scopeAt(m, ix, off);
     return withContext([...contextOf(fn ?? asDsymbol(m)), list[0]?.inst ?? null], () =>
-        ["**Resolved**", ...list.map((r) => `${r.label}\n\n${codeBlock([r.text().trimEnd()])}`)].join("\n\n"));
+        ["**Resolved**", ...list.map((r) => {
+            const doc = r.called !== null ? summaryOf(r.called) : "";
+            return `${r.label}\n\n${codeBlock([r.text().trimEnd()])}${doc !== "" ? `\n\n${doc}` : ""}`;
+        })].join("\n\n"));
 }
 
 /**
@@ -5932,8 +6926,9 @@ function signatureOf(sym: Dsymbol): string {
 
 /**
  * The doc comment of `sym`: its own; for a member of a template instance (whose copies carry none), the comment of
- * the template when the member is the instance's eponymous one, else the one of the template member it was copied
- * from (same name, same location). A `ditto` comment stands for the previous documented declaration's (`dittoOf`).
+ * the template when the member is the instance's eponymous one (the template's own original when the template is a
+ * member of an instance, `Vec!int.opBinary!"+"`), else the one of the template member it was copied from (same name,
+ * same location). A `ditto` comment stands for the previous documented declaration's (`dittoOf`).
  */
 function docOf(sym: Dsymbol): DString | null {
     const own = sym.comment();
@@ -5946,7 +6941,9 @@ function docOf(sym: Dsymbol): DString | null {
             continue;
         if (sym.parent === ti && sym.ident === td.ident) {
             const c = td.comment();
-            return c !== null && isDitto(c) ? dittoOf(td.parent?.isScopeDsymbol()?.members ?? null, td) : c;
+            if (c === null)   // a member template of an instance: the template is a copy too
+                return td.parent !== null && td.parent.isModule() === null ? docOf(td) : null;
+            return isDitto(c) ? dittoOf(td.parent?.isScopeDsymbol()?.members ?? null, td) : c;
         }
         const orig = original(td.members ?? null, sym);
         if (orig === null)
@@ -6105,4 +7102,991 @@ function renderDoc(sym: Dsymbol, comment: DString): string {
         }
     }
     return out.join("\n\n");
+}
+
+// ── document symbols ─────────────────────────────────────────────────────────────────────────────────────────
+
+/** The symbol kinds `queryDocumentSymbols` gives, LSP's names. */
+export type SymbolKindName = "module" | "namespace" | "class" | "struct" | "interface" | "enum" | "enumMember"
+    | "function" | "method" | "constructor" | "property" | "field" | "variable" | "constant" | "typeParameter";
+
+/** One declaration of a file's outline (DOCUMENT SYMBOLS in the header). */
+export interface DocumentSymbol {
+    name: string;
+    kind: SymbolKindName;
+    /** The signature or type, short (cut at 60 characters); `(mixin) ` before a string mixin's declarations. */
+    detail: string;
+    /** The whole declaration, and its name, which `range` contains. */
+    range: QueryRange;
+    selectionRange: QueryRange;
+    children: DocumentSymbol[];
+}
+
+/** The outline of one file: its declarations as a tree, each level sorted by position. */
+export interface DocumentSymbolsResult {
+    symbols: DocumentSymbol[];
+}
+
+/** The answer of `queryDocumentSymbols`: the outline, or a miss (the file is not in the last compile; `stale`). */
+export type DocumentSymbolsAnswer = { result: DocumentSymbolsResult } | QueryMiss;
+
+/**
+ * The declarations of `file`, whose editor text is `text`, as a tree (DOCUMENT SYMBOLS in the header), from the last
+ * compile; read-only, between compiles (THE CONTRACT). Misses: the file is not in the last compile; `stale`
+ * (STALE_REASON) when `text` is not the text that compile read. Cost: the file's index when no query built it since
+ * the compile (the nested declarations come from it), then one pass over the module's members, printing each detail.
+ */
+export function queryDocumentSymbols(file: string, text: string): DocumentSymbolsAnswer {
+    return printing(() => {
+        const m = moduleOf(file);
+        if (m === null)
+            return miss("the file is not in the last compile");
+        const ix = indexOf(m);
+        if (text !== ix.text)
+            return miss(STALE_REASON, true);
+        hitsOf(m, ix);
+        return { result: { symbols: new Outline(m, ix).symbols() } };
+    });
+}
+
+/** An outline node in byte offsets, converted to positions at the end. */
+interface OutlineNode {
+    name: string;
+    kind: SymbolKindName;
+    detail: string;
+    range: [number, number];
+    selection: [number, number];
+    children: OutlineNode[];
+}
+
+/** The walk of `queryDocumentSymbols` over one module's members (DOCUMENT SYMBOLS in the header). */
+class Outline {
+    private readonly file: string;
+    private readonly t: Uint8Array;
+    /** The nodes made, by name and selection start: a `static foreach` copy or a second branch adds none. */
+    private readonly seen = new Set<string>();
+
+    constructor(private readonly m: Module, private readonly ix: FileIndex) {
+        this.file = str(m.srcfile.toChars());
+        this.t = ix.bytes;
+    }
+
+    symbols(): DocumentSymbol[] {
+        const nodes: OutlineNode[] = [];
+        const md = this.m.md;
+        const at = md !== null ? this.offsetIn(md.loc) : null;
+        const name = moduleNameAt(this.m, this.ix);
+        if (md !== null && at !== null && name >= 0) {
+            const full = [...md.packages, md.id!].map(identText).join(".");
+            nodes.push(this.make(full, "module", "", [at, this.end(at)], this.selectionAt(name)));
+        }
+        nodes.push(...this.members(this.m.members, null, ""));
+        const convert = (n: OutlineNode): DocumentSymbol => ({
+            name: n.name, kind: n.kind, detail: n.detail,
+            range: { start: positionOf(this.t, n.range[0]), end: positionOf(this.t, n.range[1]) },
+            selectionRange: { start: positionOf(this.t, n.selection[0]), end: positionOf(this.t, n.selection[1]) },
+            children: n.children.map(convert),
+        });
+        return sortNodes(nodes).map(convert);
+    }
+
+    /** The byte offset of `loc` when it is in this file, else null. */
+    private offsetIn(loc: Loc): number | null {
+        const name = loc.isValid() ? loc.filename() : null;
+        if (name === null || str(name) !== this.file)
+            return null;
+        const off = loc.fileOffset();
+        return off < this.t.length ? off : null;
+    }
+
+    /** The end of the declaration at `off` (`statementEnd`). */
+    private end(off: number): number {
+        return statementEnd(this.t, this.ix.nonCode, off);
+    }
+
+    private selectionAt(start: number): [number, number] {
+        return [start, identEnd(this.t, start)];
+    }
+
+    private make(name: string, kind: SymbolKindName, detail: string, range: [number, number],
+        selection: [number, number], children: OutlineNode[] = []): OutlineNode {
+        return { name, kind, detail, range: [Math.min(range[0], selection[0]), Math.max(range[1], selection[1])],
+            selection, children: sortNodes(children) };
+    }
+
+    /**
+     * The nodes of a member list: conditionals by the branch the analysis chose (both when it decided none), the
+     * other attributes transparent, a string mixin's declarations at its site (`site`) with `(mixin) ` before their
+     * detail (`marker`), the imports in one `imports` node.
+     */
+    private members(list: Iterable<Dsymbol | null> | null, site: [number, number] | null, marker: string,
+        inAggregate = false): OutlineNode[] {
+        const out: OutlineNode[] = [];
+        const imports: OutlineNode[] = [];
+        for (const s of list ?? []) {
+            if (s === null)
+                continue;
+            if (s instanceof ConditionalDeclaration) {
+                const inc = s.condition?.inc ?? Include.notComputed;
+                if (inc !== Include.no)
+                    out.push(...this.members(s.decl, site, marker, inAggregate));
+                if (inc !== Include.yes)
+                    out.push(...this.members(s.elsedecl, site, marker, inAggregate));
+            } else if (s instanceof StaticForeachDeclaration) {
+                out.push(...this.members(s.cache, site, marker, inAggregate));
+            } else if (s.isMixinDeclaration() !== null) {
+                const at = this.offsetIn(s.loc);
+                const mixed = site ?? (at !== null ? [at, this.end(at)] as [number, number] : null);
+                if (mixed !== null)
+                    out.push(...this.members(s.isMixinDeclaration()!.decl, mixed, "(mixin) ", inAggregate));
+            } else if (s.isAttribDeclaration() !== null) {
+                out.push(...this.members(s.isAttribDeclaration()!.decl, site, marker, inAggregate));
+            } else if (s.isImport() !== null) {
+                const n = this.importNode(s.isImport()!, site);
+                if (n !== null)
+                    imports.push(n);
+            } else {
+                out.push(...this.node(s, site, marker, inAggregate));
+            }
+        }
+        if (imports.length !== 0) {
+            const first = imports.reduce((a, b) => (b.range[0] < a.range[0] ? b : a));
+            const last = Math.max(...imports.map((n) => n.range[1]));
+            out.push(this.make("imports", "namespace", "", [first.range[0], last], first.selection, imports));
+        }
+        return out;
+    }
+
+    /** An import: the module's name as written, its selective names and renames as the detail. */
+    private importNode(imp: Import, site: [number, number] | null): OutlineNode | null {
+        const off = this.offsetIn(imp.loc);
+        const ids = [...(imp.packages ?? []), imp.id!];
+        const name = ids.map(identText).join(".");
+        const named = off !== null ? findName(this.t, off, [identText(ids[0]!)]) : -1;
+        const selection = site ?? (named >= 0 ? this.selectionAt(named) : null);
+        if (selection === null || !this.fresh(name, selection[0]))
+            return null;
+        const names: string[] = [];
+        for (let i = 0; i < imp.names.length; i++) {
+            const alias = i < imp.aliases.length ? imp.aliases.opIndex(i) : null;
+            const n = identText(imp.names.opIndex(i));
+            names.push(alias !== null ? `${identText(alias)} = ${n}` : n);
+        }
+        const detail = (imp.aliasId !== null ? `${identText(imp.aliasId)} = ` : "") + (names.length !== 0
+            ? `: ${names.join(", ")}` : "");
+        return this.make(name, "module", clip(detail), site ?? [off!, this.end(off!)], selection);
+    }
+
+    /** Whether no node has `name` at `start` yet; notes it. */
+    private fresh(name: string, start: number): boolean {
+        const key = `${start}:${name}`;
+        if (this.seen.has(key))
+            return false;
+        this.seen.add(key);
+        return true;
+    }
+
+    /** The node of a declaration (none for one the outline skips; an anonymous enum's members). */
+    private node(s: Dsymbol, site: [number, number] | null, marker: string, inAggregate = false): OutlineNode[] {
+        const off = this.offsetIn(s.loc);
+        if (site === null && off === null)
+            return [];
+        const named = this.named(s, inAggregate);
+        if (named === null) {
+            const ed = s.isEnumDeclaration();
+            return ed !== null ? this.members(ed.members, site, marker, inAggregate) : [];
+        }
+        let selection = site;
+        if (selection === null) {
+            const k = keyAt(this.t, off!, namesOf(s));
+            selection = k !== null ? this.selectionAt(k.start) : [off!, off!];
+        }
+        if (!this.fresh(named.name, selection[0]))
+            return [];
+        const range: [number, number] = site ?? (s.isEnumMember() !== null ? selection
+            : [declarationStart(this.t, off!), this.end(off!)]);
+        const children = this.childrenOf(s, site, marker, off, inAggregate);
+        return [this.make(named.name, named.kind, marker + clip(this.detailOf(s)), range, selection, children)];
+    }
+
+    /**
+     * The name and kind the outline shows `s` with, `inAggregate` when it is a member of an aggregate (a template's
+     * members, not analysed, have no parent to say so); null for an anonymous enum and the declarations it skips.
+     */
+    private named(s: Dsymbol, inAggregate: boolean): { name: string; kind: SymbolKindName } | null {
+        const fd = s.isFuncDeclaration();
+        if (fd !== null) {
+            if (fd.isFuncLiteralDeclaration() !== null || fd.isNewDeclaration() !== null || fd.isGenerated)
+                return null;
+            if (fd.isUnitTestDeclaration() !== null)
+                return { name: "unittest", kind: "function" };
+            if (fd.isCtorDeclaration() !== null)
+                return { name: "this", kind: "constructor" };
+            if (fd.isPostBlitDeclaration() !== null)
+                return { name: "this(this)", kind: "method" };
+            if (fd.isDtorDeclaration() !== null)
+                return { name: "~this", kind: "method" };
+            if (fd.isInvariantDeclaration() !== null)
+                return { name: "invariant", kind: "method" };
+            const shared = fd.isSharedStaticCtorDeclaration() !== null || fd.isSharedStaticDtorDeclaration() !== null
+                ? "shared " : "";
+            if (fd.isStaticCtorDeclaration() !== null)
+                return { name: `${shared}static this`, kind: "constructor" };
+            if (fd.isStaticDtorDeclaration() !== null)
+                return { name: `${shared}static ~this`, kind: "function" };
+        }
+        if (s.ident === null || isCompilerName(s))
+            return null;
+        const name = identText(s.ident);
+        const td = s.isTemplateDeclaration();
+        if (td !== null) {
+            const one = eponymousOnly(td);
+            return { name, kind: one !== null ? this.named(one, inAggregate)?.kind ?? "namespace" : "namespace" };
+        }
+        if (fd !== null) {
+            const property = fd.type?.isTypeFunction()?.isProperty === true;
+            const method = inAggregate || fd.isMember2() !== null;
+            return { name, kind: property ? "property" : method ? "method" : "function" };
+        }
+        const ad = s.isAggregateDeclaration();
+        if (ad !== null)
+            return { name, kind: ad.isInterfaceDeclaration() !== null ? "interface"
+                : ad.isClassDeclaration() !== null ? "class" : "struct" };
+        if (s.isEnumDeclaration() !== null)
+            return { name, kind: "enum" };
+        if (s.isEnumMember() !== null)
+            return { name, kind: "enumMember" };
+        const v = s.isVarDeclaration();
+        if (v !== null) {
+            const field = inAggregate || v.isField();
+            return { name, kind: (v.storage_class & STC.manifest) !== 0n ? "constant" : field ? "field" : "variable" };
+        }
+        if (s.isAliasDeclaration() !== null)
+            return { name, kind: completionKind(s) };
+        if (s.isTemplateMixin() !== null)
+            return { name, kind: "namespace" };
+        return null;
+    }
+
+    /** The detail: a function's or variable's type, an aggregate's bases, an alias's target, template parameters. */
+    private detailOf(s: Dsymbol): string {
+        const td = s.isTemplateDeclaration();
+        if (td !== null) {
+            const printed = str(dsymbolToChars(td)).slice(identText(td.ident).length);
+            let depth = 0;
+            let close = 0;
+            while (close < printed.length && (printed[close] !== ")" || --depth !== 0))
+                depth += printed[close++] === "(" ? 1 : 0;
+            const params = printed.slice(0, close + 1);
+            const one = eponymousOnly(td);
+            return `${params} ${one !== null ? this.detailOf(one) : ""}`.trim();
+        }
+        const fd = s.isFuncDeclaration();
+        if (fd !== null)
+            return fd.type !== null ? str(fd.type.toChars()) : "";
+        const em = s.isEnumMember();
+        if (em !== null)
+            return em.origValue !== null ? str(expressionToChars(em.origValue)) : "";
+        const v = s.isVarDeclaration();
+        if (v !== null) {
+            const type = v.type ?? v.originalType;
+            return type !== null ? str(type.toChars()) : "";
+        }
+        const ed = s.isEnumDeclaration();
+        if (ed !== null)
+            return ed.memtype !== null ? str(ed.memtype.toChars()) : "";
+        const ad = s.isAggregateDeclaration();
+        if (ad !== null) {
+            const sig = signatureOf(ad);
+            const colon = sig.indexOf(" : ");
+            return colon >= 0 ? sig.slice(colon + 1) : "";
+        }
+        const al = s.isAliasDeclaration();
+        if (al !== null)
+            return al.aliassym !== null ? `= ${str(al.aliassym.toPrettyChars())}`
+                : al.type !== null ? `= ${str(al.type.toChars())}` : "";
+        const tm = s.isTemplateMixin();
+        if (tm !== null)
+            return `mixin ${str(tm.toChars())}`;
+        return "";
+    }
+
+    /**
+     * A declaration's children: an aggregate's, an enum's, a template's and a template mixin's members (a template
+     * mixin's at its own site), an eponymous template's member's, a function's nested declarations.
+     */
+    private childrenOf(s: Dsymbol, site: [number, number] | null, marker: string, off: number | null,
+        inAggregate: boolean): OutlineNode[] {
+        const td = s.isTemplateDeclaration();
+        if (td !== null) {
+            const one = eponymousOnly(td);
+            if (one !== null)
+                return this.childrenOf(one, site, marker, off, inAggregate);
+            return this.members(td.members, site, marker, inAggregate);
+        }
+        const tm = s.isTemplateMixin();
+        if (tm !== null)
+            return this.members(tm.members, site ?? (off !== null ? [off, this.end(off)] : null), marker, inAggregate);
+        if (s.isAggregateDeclaration() !== null || s.isEnumDeclaration() !== null)
+            return this.members(s.isScopeDsymbol()!.members, site, marker, s.isAggregateDeclaration() !== null);
+        const fd = s.isFuncDeclaration();
+        return fd !== null && site === null && off !== null ? this.nested(off) : [];
+    }
+
+    /**
+     * The functions, aggregates, enums and templates declared in the body of the function whose location is `off`,
+     * from the index (the declarations the walk met at their names, of every analysed copy of the body): those whose
+     * nearest enclosing named function is located there. None in a body no analysis ran.
+     */
+    private nested(off: number): OutlineNode[] {
+        const body = this.ix.functions.find((b) => b.start === off);
+        if (body === undefined)
+            return [];
+        const out: OutlineNode[] = [];
+        for (const [key, hits] of this.ix.hits!) {
+            if (key <= off || key >= body.end)
+                continue;
+            for (const h of hits) {
+                const s = h.sym;
+                const declares = s.isFuncDeclaration() !== null || s.isAggregateDeclaration() !== null
+                    || s.isEnumDeclaration() !== null || s.isTemplateDeclaration() !== null;
+                if (declares && this.enclosingFunctionAt(s) === off && isDeclarationAt(this.m, this.ix, this.file, s,
+                    key))
+                    out.push(...this.node(s, null, ""));
+            }
+        }
+        return out;
+    }
+
+    /** The offset of the nearest named function enclosing `s` (literals skipped), or -1. */
+    private enclosingFunctionAt(s: Dsymbol): number {
+        for (let p = s.parent; p !== null; p = p.parent) {
+            const fd = p.isFuncDeclaration();
+            if (fd !== null && fd.isFuncLiteralDeclaration() === null)
+                return this.offsetIn(fd.loc) ?? -1;
+        }
+        return -1;
+    }
+}
+
+/**
+ * The first member of `td` when every member is named as `td` (one, or overloads), through attribute blocks; else
+ * null. Read-only: `td.onemember` is computed at the first analysis that needs it (templatesem.d `computeOneMember`).
+ */
+function eponymousOnly(td: TemplateDeclaration): Dsymbol | null {
+    const all: Dsymbol[] = [];
+    const collect = (list: Iterable<Dsymbol | null> | null): void => {
+        for (const s of list ?? []) {
+            const attrib = s?.isAttribDeclaration() ?? null;
+            if (attrib !== null && !(s instanceof ConditionalDeclaration))
+                collect(attrib.decl);
+            else if (s !== null)
+                all.push(s);
+        }
+    };
+    collect(td.members);
+    return all.length !== 0 && all.every((s) => s.ident === td.ident) ? all[0]! : null;
+}
+
+/** Nodes in source order. */
+function sortNodes(nodes: OutlineNode[]): OutlineNode[] {
+    return nodes.sort((a, b) => a.range[0] - b.range[0] || a.selection[0] - b.selection[0]);
+}
+
+// ── references ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** One reference (REFERENCES in the header): the file as the compiler names it, the identifier's range. */
+export interface ReferenceSite {
+    file: string;
+    range: QueryRange;
+    /** Whether the token is the declaration's own name (a template parameter's in its parameter list). */
+    declaration: boolean;
+}
+
+/** The references of the symbol under a position, sorted by file then position. */
+export interface ReferencesResult {
+    /** The symbol's qualified name; a template parameter's as `Template.T`. */
+    name: string;
+    references: ReferenceSite[];
+}
+
+/** The answer of `queryReferences`: the references, or a miss (as `queryHover`'s). */
+export type ReferencesAnswer = { result: ReferencesResult } | QueryMiss;
+
+/** What `queryReferences` looks for: a symbol by its declaration (`referenceKey`), or a template's parameter. */
+type ReferenceTarget =
+    | { kind: "symbol"; sym: Dsymbol; key: string | Dsymbol; name: string; aggregate: boolean }
+    | { kind: "parameter"; m: Module; ix: FileIndex; td: TemplateDeclaration; name: string; at: number;
+        extent: [number, number] };
+
+/**
+ * The references of the symbol at (line, character) of `file`, whose editor text is `text` (REFERENCES in the
+ * header), in every module the last compile analysed (its roots and the modules `-i` compiled); read-only, between
+ * compiles (THE CONTRACT). Misses: those of `queryHover` (the file is not in the last compile; `stale`; no identifier
+ * or no symbol at the position). Cost: the index of each analysed module whose text holds the name (its first query
+ * after a compile builds it), then one lookup per occurrence of the name.
+ */
+export function queryReferences(file: string, line: number, character: number, text: string): ReferencesAnswer {
+    return printing(() => {
+        const r = referenceTarget(file, line, character, text);
+        if ("reason" in r)
+            return r;
+        const t = r.target;
+        const name = t.kind === "symbol" ? str(t.sym.toPrettyChars())
+            : `${str(t.td.toPrettyChars())}.${t.name}`;
+        return { result: { name, references: referencesOf(t) } };
+    });
+}
+
+/** The start of the identifier at (line, character) of the compiled text `bytes` (the one before it), or why none. */
+function identifierStart(bytes: Uint8Array, line: number, character: number): number | QueryMiss {
+    let off = byteOffset(bytes, line, character);
+    if (off === null)
+        return miss("the position is outside the text");
+    if (!isIdentByte(bytes[off]) && off > 0 && isIdentByte(bytes[off - 1]))
+        off--;
+    if (!isIdentByte(bytes[off]))
+        return miss("no identifier at the position");
+    while (off > 0 && isIdentByte(bytes[off - 1]))
+        off--;
+    return isIdentStart(bytes[off]) ? off : miss("no identifier at the position");
+}
+
+/**
+ * What the identifier at a position names, for the references: a parameter of a template declared in the file whose
+ * extent holds it (not after a `.`), else the token's symbol (`tokenSymbol`), a constructor named by its aggregate's
+ * name (`S(1)`, `new S`) standing for the aggregate.
+ */
+function referenceTarget(file: string, line: number, character: number, text: string)
+    : { target: ReferenceTarget; m: Module; ix: FileIndex; start: number } | QueryMiss {
+    const m = moduleOf(file);
+    if (m === null)
+        return miss("the file is not in the last compile");
+    const ix = indexOf(m);
+    if (text !== ix.text)
+        return miss(STALE_REASON, true);
+    hitsOf(m, ix);
+    const start = identifierStart(ix.bytes, line, character);
+    if (typeof start !== "number")
+        return start;
+    const word = utf8.decode(ix.bytes.subarray(start, identEnd(ix.bytes, start)));
+    const param = parameterAt(m, ix, start, word);
+    if (param !== null)
+        return { target: param, m, ix, start };
+    let sym = tokenSymbol(m, ix, start, inactiveFrom(m, ix, start));
+    if (sym === null || (isCompilerName(sym) && sym.isCtorDeclaration() === null))
+        return miss("no symbol at the position");
+    if (sym.isCtorDeclaration() !== null && word !== "this")
+        sym = sym.parent?.isAggregateDeclaration() ?? sym;
+    sym = canonicalOf(sym);
+    const target: ReferenceTarget = { kind: "symbol", sym, key: referenceKey(sym),
+        name: sym.isCtorDeclaration() !== null ? "this" : identText(sym.ident), aggregate:
+        sym.isAggregateDeclaration() !== null };
+    return { target, m, ix, start };
+}
+
+/** The first inactive range of `m` that ends after `off` (`tokenSymbol`'s argument), or null. */
+function inactiveFrom(m: Module, ix: FileIndex, off: number): [number, number] | null {
+    const ranges = inactiveOf(m, ix);
+    return ranges[firstRangeFrom(ranges, off)] ?? null;
+}
+
+/** A template instance stands for its template. */
+function canonicalOf(sym: Dsymbol): Dsymbol {
+    const ti = sym.isTemplateInstance();
+    return ti !== null && ti.tempdecl !== null ? ti.tempdecl : sym;
+}
+
+/**
+ * The identity of a symbol for the references: its declaration's identifier (`declarationOf`), shared by a
+ * template's member and its copies in every instance, by a function template and its instances' functions; the
+ * symbol itself when it has none (no location, declared in a string mixin).
+ */
+function referenceKey(sym: Dsymbol): string | Dsymbol {
+    const d = declarationOf(canonicalOf(sym), true);
+    return typeof d === "string" ? canonicalOf(sym) : `${d.file}\n${d.range.start.line}:${d.range.start.character}`;
+}
+
+/** Whether `sym` is a reference of `t`: the same key, or a constructor of the aggregate `t` names. */
+function isReferenceOf(sym: Dsymbol, t: ReferenceTarget & { kind: "symbol" }): boolean {
+    if (referenceKey(sym) === t.key)
+        return true;
+    const owner = t.aggregate && sym.isCtorDeclaration() !== null ? sym.parent : null;
+    return owner !== null && referenceKey(owner) === t.key;
+}
+
+/**
+ * The template declared in the file whose parameter the identifier at `start` (`word`) is: the innermost whose
+ * extent (from its line's first token to its end) holds the token and whose parameters declare `word`, the token not
+ * after a `.`; null when none.
+ */
+function parameterAt(m: Module, ix: FileIndex, start: number, word: string)
+    : (ReferenceTarget & { kind: "parameter" }) | null {
+    const t = ix.bytes;
+    let p = start;
+    while (p > 0 && (t[p - 1] === 0x20 || t[p - 1] === 0x09 || t[p - 1] === 0x0a || t[p - 1] === 0x0d))
+        p--;
+    if (p > 0 && t[p - 1] === 0x2e && inCode(ix, p - 1))
+        return null;
+    let best: (ReferenceTarget & { kind: "parameter" }) | null = null;
+    for (const x of templatesOf(m, ix)) {
+        if (start < x.extent[0] || start >= x.extent[1] || x.params.get(word) === undefined)
+            continue;
+        if (best === null || x.extent[0] >= best.extent[0])
+            best = { kind: "parameter", m, ix, td: x.td, name: word, at: x.params.get(word)!, extent: x.extent };
+    }
+    return best;
+}
+
+/** `templatesOf`'s answer per index, found once (a hover at a template parameter asks it at every miss). */
+const templatesByIndex = new WeakMap<FileIndex, { td: TemplateDeclaration; extent: [number, number];
+    params: Map<string, number> }[]>();
+
+/**
+ * The templates the index met at their declarations in the file (the walk records a template at its name, a
+ * member template through its instances' copies), each with its extent and its parameters' names at their tokens.
+ * Found at the first need after the index's build (`templatesByIndex`).
+ */
+function templatesOf(m: Module, ix: FileIndex): { td: TemplateDeclaration; extent: [number, number];
+    params: Map<string, number> }[] {
+    const known = templatesByIndex.get(ix);
+    if (known !== undefined)
+        return known;
+    const file = str(m.srcfile.toChars());
+    const out: { td: TemplateDeclaration; extent: [number, number]; params: Map<string, number> }[] = [];
+    const seen = new Set<number>();
+    for (const [key, hits] of hitsOf(m, ix)) {
+        for (const h of hits) {
+            const td = h.sym.isTemplateDeclaration();
+            if (td === null || seen.has(key) || !isDeclarationAt(m, ix, file, td, key))
+                continue;
+            seen.add(key);
+            const off = td.loc.fileOffset();
+            const params = new Map<string, number>();
+            for (const tp of td.parameters ?? []) {
+                const at = tp !== null && tp.ident !== null && tp.loc.isValid() && tp.loc.fileOffset() < ix.bytes.length
+                    ? keyAt(ix.bytes, tp.loc.fileOffset(), [identText(tp.ident)]) : null;
+                if (at !== null && at.named)
+                    params.set(identText(tp!.ident), at.start);
+            }
+            out.push({ td, extent: [declarationStart(ix.bytes, off), statementEnd(ix.bytes, ix.nonCode, off)],
+                params });
+        }
+    }
+    templatesByIndex.set(ix, out);
+    return out;
+}
+
+/**
+ * The start of the declaration whose location is `off`: back over what precedes it on its line (a type, the
+ * attributes) up to a `;`, `{` or `}`, then forward over whitespace.
+ */
+function declarationStart(t: Uint8Array, off: number): number {
+    let p = off;
+    while (p > 0 && ![0x0a, 0x3b, 0x7b, 0x7d].includes(t[p - 1]!))
+        p--;
+    while (p < off && (t[p] === 0x20 || t[p] === 0x09 || t[p] === 0x0d))
+        p++;
+    return p;
+}
+
+/** The modules the last compile analysed: its roots and those `-i` compiled, not those only imported. */
+function analysedModules(): Module[] {
+    const included = new Set(compiledImports.opSlice());
+    return Module.amodules.opSlice().filter((m): m is Module => m !== null && m.src !== null
+        && (m.isRoot() || included.has(m)));
+}
+
+/** The starts of the identifiers spelled `name` in `t`, outside comments and literals (`ix`'s `nonCode`). */
+function occurrences(ix: FileIndex, name: string): number[] {
+    const t = Buffer.from(ix.bytes.buffer, ix.bytes.byteOffset, ix.bytes.length);
+    const out: number[] = [];
+    for (let p = t.indexOf(name); p >= 0; p = t.indexOf(name, p + 1)) {
+        if (!isIdentByte(t[p - 1]) && !isIdentByte(t[p + Buffer.byteLength(name)]) && inCode(ix, p))
+            out.push(p);
+    }
+    return out;
+}
+
+/** The references of `t` (REFERENCES in the header), sorted by file then position. */
+function referencesOf(t: ReferenceTarget): ReferenceSite[] {
+    if (t.kind === "parameter") {
+        const file = str(t.m.srcfile.toChars());
+        const shadows = templatesOf(t.m, t.ix).filter((x) => x.td !== t.td && x.params.has(t.name)
+            && x.extent[0] >= t.extent[0] && x.extent[1] <= t.extent[1]);
+        return occurrences(t.ix, t.name).filter((p) => p >= t.extent[0] && p < t.extent[1]
+            && !shadows.some((x) => p >= x.extent[0] && p < x.extent[1])
+            && parameterAt(t.m, t.ix, p, t.name)?.td === t.td)
+            .map((p) => ({ file, range: identRange(t.ix.bytes, p), declaration: p === t.at }));
+    }
+    const out: ReferenceSite[] = [];
+    // a declaration in a string mixin is written inside a literal, where no occurrence is looked for
+    const mixed = typeof declarationOf(t.sym, true) === "string" ? mixinSite(t.sym) : null;
+    if (mixed !== null && mixed.named && analysedModules().some((m) => resolve(str(m.srcfile.toChars()))
+        === resolve(mixed.file)))
+        out.push({ file: mixed.file, range: mixed.range, declaration: true });
+    for (const m of analysedModules()) {
+        const ix = indexOf(m);
+        if (!ix.text.includes(t.name))
+            continue;
+        hitsOf(m, ix);
+        const file = str(m.srcfile.toChars());
+        for (const p of occurrences(ix, t.name)) {
+            const syms = choose(m, ix, p).map((h) => h.sym);
+            const own = tokenSymbol(m, ix, p, inactiveFrom(m, ix, p));
+            if (own !== null)
+                syms.push(own);
+            const hits = syms.filter((s) => isReferenceOf(s, t));
+            if (hits.length !== 0)
+                out.push({ file, range: identRange(ix.bytes, p),
+                    declaration: hits.some((s) => isDeclarationAt(m, ix, file, s, p)) });
+        }
+    }
+    return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+        || a.range.start.line - b.range.start.line || a.range.start.character - b.range.start.character);
+}
+
+// ── rename ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** What a rename at a position would change: the identifier there, and its current text. */
+export interface PrepareRenameResult {
+    range: QueryRange;
+    placeholder: string;
+}
+
+/** The answer of `queryPrepareRename`: the identifier, or a miss whose reason says why it cannot be renamed. */
+export type PrepareRenameAnswer = { result: PrepareRenameResult } | QueryMiss;
+
+/** A rename's edits: each range (a reference, `queryReferences`'s) replaced by the new name. */
+export interface RenameResult {
+    newName: string;
+    edits: { file: string; range: QueryRange }[];
+}
+
+/** The answer of `queryRename`: the edits, or a miss (`queryPrepareRename`'s, or the new name refused). */
+export type RenameAnswer = { result: RenameResult } | QueryMiss;
+
+/** Names D calls with no token of their own: a `foreach` over a range, `$`, a conversion, a hash. */
+const IMPLICIT_NAMES: ReadonlySet<string> = new Set(["front", "back", "empty", "popFront", "popBack", "save", "length",
+    "toString", "toHash"]);
+
+/**
+ * Whether the symbol at (line, character) of `file`, whose editor text is `text`, can be renamed (RENAME in the
+ * header): its identifier and name, else a miss whose reason says why not. Read-only, between compiles. Cost: a
+ * `queryReferences`, and a scan of the string mixins of the modules that spell the name.
+ */
+export function queryPrepareRename(file: string, line: number, character: number, text: string): PrepareRenameAnswer {
+    return printing(() => {
+        const r = renameTarget(file, line, character, text);
+        if ("reason" in r)
+            return r;
+        return { result: { range: identRange(r.ix.bytes, r.start), placeholder: r.target.name } };
+    });
+}
+
+/**
+ * The edits renaming the symbol at (line, character) of `file` to `newName` (RENAME in the header): every reference
+ * of `queryReferences`, the declaration's name included. Misses: `queryPrepareRename`'s; a new name that is not a D
+ * identifier, is a keyword or starts with `__`; one the symbol's scope already declares (a template parameter: one the
+ * template already spells).
+ */
+export function queryRename(file: string, line: number, character: number, text: string, newName: string)
+    : RenameAnswer {
+    return printing(() => {
+        const r = renameTarget(file, line, character, text);
+        if ("reason" in r)
+            return r;
+        const t = r.target;
+        if (!/^[\p{L}_][\p{L}\p{N}_]*$/u.test(newName) || KEYWORDS.has(newName) || newName.startsWith("__"))
+            return miss(`\`${newName}\` is not a name a declaration can take`);
+        if (t.kind === "parameter") {
+            if (occurrences(t.ix, newName).some((p) => p >= t.extent[0] && p < t.extent[1]))
+                return miss(`\`${newName}\` is already used in the template`);
+        } else {
+            const id = Identifier.lookup(encoder.encode(newName));
+            const scope = t.sym.parent?.isScopeDsymbol() ?? null;
+            const clash = id !== null ? scope?.symtab?.lookup(id) ?? null : null;
+            if (clash !== null && clash !== t.sym)
+                return miss(`\`${newName}\` is already declared in \`${str(scope!.toPrettyChars())}\``);
+        }
+        return { result: { newName, edits: r.references.map((x) => ({ file: x.file, range: x.range })) } };
+    });
+}
+
+/**
+ * The target of a rename at a position and its references, or why it cannot be renamed: a module or package (its
+ * file), a constructor or another special function (`this`), a name D calls implicitly (`IMPLICIT_NAMES`, an
+ * operator's `opBinary`), a symbol declared in a string mixin or without a declaration, one declared in a module the
+ * last compile only imports (the bundled import tree's included: its other uses are not analysed), one whose name a
+ * string mixin's text spells in an analysed module (a token string, or a literal in a `mixin(...)`'s arguments).
+ */
+function renameTarget(file: string, line: number, character: number, text: string)
+    : { target: ReferenceTarget; ix: FileIndex; start: number; references: ReferenceSite[] } | QueryMiss {
+    const r = referenceTarget(file, line, character, text);
+    if ("reason" in r)
+        return r;
+    const t = r.target;
+    if (t.kind === "symbol") {
+        const s = t.sym;
+        if (s.isModule() !== null || s.isPackage() !== null)
+            return miss("a module is renamed with its file");
+        if (s.isFuncDeclaration() !== null && (s.isCtorDeclaration() !== null || s.isDtorDeclaration() !== null
+            || s.isPostBlitDeclaration() !== null || s.isInvariantDeclaration() !== null
+            || s.isUnitTestDeclaration() !== null || s.isStaticCtorDeclaration() !== null
+            || s.isStaticDtorDeclaration() !== null))
+            return miss("a special function has no name of its own");
+        if (OPERATOR_FUNCTION.test(t.name) || IMPLICIT_NAMES.has(t.name))
+            return miss(`D calls \`${t.name}\` with no token of its name (an operator, a \`foreach\`, a conversion)`);
+        const d = declarationOf(s, true);
+        if (typeof d === "string")
+            return miss(`\`${t.name}\` cannot be renamed: ${d}`);
+        const declaring = analysedModules().find((m) => resolve(str(m.srcfile.toChars())) === resolve(d.file));
+        if (declaring === undefined)
+            return miss(`\`${t.name}\` is declared in ${d.file}, which the last compile only imports: its other uses `
+                + "are not analysed");
+    }
+    const spelled = mixinSpelling(t);
+    if (spelled !== null)
+        return miss(`\`${t.name}\` is spelled in the text of a string mixin at ${spelled}`);
+    return { target: t, ix: r.ix, start: r.start, references: referencesOf(t) };
+}
+
+/**
+ * Where a string mixin's text spells `t`'s name as a word in a module the references search (the template's own file
+ * for a parameter): a token string anywhere, or a string literal in the arguments of a `mixin (...)`; `file:line`
+ * (line from 1), or null when none.
+ */
+function mixinSpelling(t: ReferenceTarget): string | null {
+    const word = new RegExp(`(?<![\\p{L}\\p{N}_])${t.name}(?![\\p{L}\\p{N}_])`, "u");
+    const modules = t.kind === "parameter" ? [t.m] : analysedModules();
+    for (const m of modules) {
+        const ix = indexOf(m);
+        if (!ix.text.includes(t.name))
+            continue;
+        hitsOf(m, ix);
+        const b = ix.bytes;
+        const mixins = occurrences(ix, "mixin").map((at) => [at, mixinEnd(b, ix.nonCode, at)] as [number, number])
+            .filter(([, e]) => e >= 0);
+        for (const [s, e] of ix.nonCode) {
+            const isString = b[s] !== 0x2f;
+            const tokenString = b[s] === 0x71 && b[s + 1] === 0x7b;
+            if (!isString || !(tokenString || mixins.some(([a, z]) => s >= a && e <= z)))
+                continue;
+            if (word.test(utf8.decode(b.subarray(s, e))))
+                return `${str(m.srcfile.toChars())}:${positionOf(b, s).line + 1}`;
+        }
+    }
+    return null;
+}
+
+// ── signature help ───────────────────────────────────────────────────────────────────────────────────────────
+
+/** One candidate of a call (SIGNATURE HELP in the header): its label, its parameters' spans in it, its doc summary. */
+export interface SignatureInformation {
+    /** `int grow(Shape s, int by)`; a constructor's as `Shape(int s)`; a template's with its parameters. */
+    label: string;
+    /** Each parameter's span in `label`, UTF-16 offsets, end exclusive. */
+    parameters: [number, number][];
+    /** The doc comment's summary on one line, "" when none. */
+    documentation: string;
+}
+
+/** The candidates of the call around a position, the one the compile picked first. */
+export interface SignatureHelpResult {
+    signatures: SignatureInformation[];
+    activeSignature: number;
+    /** The argument the position is in, from 0 (a UFCS receiver is the first). */
+    activeParameter: number;
+}
+
+/** The answer of `querySignatureHelp`: the candidates, or a miss (as `queryHover`'s; not in a call; no function). */
+export type SignatureHelpAnswer = { result: SignatureHelpResult } | QueryMiss;
+
+/** How far back from a position the call's `(` is looked for. */
+const CALL_WINDOW = 4096;
+
+/**
+ * The candidates of the call whose parentheses hold (line, character) of `file`, whose editor text is `text` (SIGNATURE
+ * HELP in the header): the function the compile resolved the call to first, then the rest of its overload set; the
+ * argument the position is in. Read-only, between compiles (THE CONTRACT). Misses: those of `queryHover` (not in the
+ * last compile; `stale`); not inside a call's parentheses; no function named before them. Cost: a backward scan of the
+ * statement, the file's index when no query built it since the compile, one print per candidate.
+ */
+export function querySignatureHelp(file: string, line: number, character: number, text: string): SignatureHelpAnswer {
+    return printing(() => {
+        const m = moduleOf(file);
+        if (m === null)
+            return miss("the file is not in the last compile");
+        const ix = indexOf(m);
+        if (text !== ix.text)
+            return miss(STALE_REASON, true);
+        hitsOf(m, ix);
+        const t = ix.bytes;
+        const off = byteOffset(t, line, character);
+        if (off === null)
+            return miss("the position is outside the text");
+        const paren = openParen(ix, off);
+        if (paren < 0)
+            return miss("not inside a call's parentheses");
+        const call = ix.calls.find((c) => c.paren === paren) ?? null;
+        let callee = identBefore(t, paren);
+        const bang = callee >= 0 ? prevCode(t, ix.nonCode, callee) : -1;
+        if (bang >= 0 && t[bang] === 0x21)   // `foo!int(`
+            callee = identBefore(t, bang);
+        else if (callee < 0 && t[prevCode(t, ix.nonCode, paren)] === 0x29)   // `foo!(int)(`
+            callee = calleeBeforeArguments(ix, prevCode(t, ix.nonCode, paren));
+        const named = callee >= 0 ? choose(m, ix, callee)[0]?.sym
+            ?? (inCode(ix, callee) ? fallback(m, ix, callee, 0) : null) : null;
+        const picked = call?.fd ?? null;
+        const candidates = callCandidates(picked, named);
+        if (candidates.length === 0)
+            return miss("no function at the call");
+        const dot = callee >= 0 ? prevCode(t, ix.nonCode, callee) : -1;
+        const free = (picked ?? candidates[0]!).isMember2() === null && !(picked ?? candidates[0]!).isNested();
+        const ufcs = call !== null ? call.ufcs : dot >= 0 && t[dot] === 0x2e && free;
+        const active = commasBefore(ix, paren, off) + (ufcs ? 1 : 0);
+        return { result: { signatures: candidates.map(signatureInformation), activeSignature: 0,
+            activeParameter: active } };
+    });
+}
+
+/**
+ * The `(` of the innermost parentheses open at `off`: backwards over the code (comments and literals skipped),
+ * balancing `()`, `[]` and `{}`; -1 when a `;`, an unbalanced `{`, `}` or `[`, or CALL_WINDOW bytes come first.
+ */
+function openParen(ix: FileIndex, off: number): number {
+    const t = ix.bytes;
+    let depth = 0;
+    for (let q = off - 1; q >= 0 && q >= off - CALL_WINDOW; q--) {
+        const k = rangeHolding(ix.nonCode, q);
+        if (k >= 0) {
+            q = ix.nonCode[k]![0];
+            continue;
+        }
+        const c = t[q];
+        if (c === 0x29 || c === 0x5d || c === 0x7d) {
+            depth++;
+        } else if (c === 0x28 || c === 0x5b || c === 0x7b) {
+            if (depth === 0)
+                return c === 0x28 ? q : -1;
+            depth--;
+        } else if (c === 0x3b && depth === 0) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/** At the `)` ending `!(...)` before a call's `(`: the template's name before the `!`, or -1. */
+function calleeBeforeArguments(ix: FileIndex, close: number): number {
+    const t = ix.bytes;
+    let depth = 0;
+    for (let q = close; q >= 0; q--) {
+        if (rangeHolding(ix.nonCode, q) >= 0)
+            continue;
+        if (t[q] === 0x29)
+            depth++;
+        else if (t[q] === 0x28 && --depth === 0) {
+            const bang = prevCode(t, ix.nonCode, q);
+            return bang >= 0 && t[bang] === 0x21 ? identBefore(t, bang) : -1;
+        }
+    }
+    return -1;
+}
+
+/** The arguments written before `off` in the call whose `(` is at `paren`: the commas at its own depth. */
+function commasBefore(ix: FileIndex, paren: number, off: number): number {
+    const t = ix.bytes;
+    let depth = 0;
+    let commas = 0;
+    for (let q = paren + 1; q < off; q++) {
+        const k = rangeHolding(ix.nonCode, q);
+        if (k >= 0) {
+            q = ix.nonCode[k]![1] - 1;
+            continue;
+        }
+        const c = t[q];
+        if (c === 0x28 || c === 0x5b || c === 0x7b)
+            depth++;
+        else if (c === 0x29 || c === 0x5d || c === 0x7d)
+            depth--;
+        else if (c === 0x2c && depth === 0)
+            commas++;
+    }
+    return commas;
+}
+
+/**
+ * The functions a call may resolve to: the one the compile picked (an instance's function when it instantiated a
+ * template), then the rest of the overload set of the name (`overloadSet`: functions, and the templates not
+ * instantiated for this call as their eponymous functions); a constructor call's set is the aggregate's constructors.
+ */
+function callCandidates(picked: FuncDeclaration | null, named: Dsymbol | null): FuncDeclaration[] {
+    let root: Dsymbol | null = null;
+    if (picked !== null) {
+        const ti = picked.parent?.isTemplateInstance() ?? null;
+        const decl: Dsymbol = ti !== null && ti.tempdecl !== null && ti.name === picked.ident ? ti.tempdecl : picked;
+        const scope = decl.parent?.isScopeDsymbol() ?? null;
+        root = (decl.ident !== null ? scope?.symtab?.lookup(decl.ident) : null) ?? decl;
+    } else if (named !== null) {
+        const al = named.isAliasDeclaration();
+        const plain = al !== null && named.isFuncAliasDeclaration() === null;
+        const s = canonicalOf(plain ? aliasTarget(al) ?? named : named);
+        const ad = s.isAggregateDeclaration();
+        root = ad !== null ? ad.symtab?.lookup(Id.ctor!) ?? null : s;
+    }
+    if (root === null)
+        return [];
+    const out: FuncDeclaration[] = picked !== null ? [picked] : [];
+    const pickedTemplate = picked?.parent?.isTemplateInstance()?.tempdecl ?? null;
+    for (const f of overloadSet(root)) {
+        const fd = f.isFuncDeclaration() ?? (f !== pickedTemplate ? eponymousOnly(f as TemplateDeclaration)
+            ?.isFuncDeclaration() ?? null : null);
+        if (fd !== null && fd !== picked && !out.includes(fd))
+            out.push(fd);
+    }
+    return out;
+}
+
+/**
+ * A candidate as signature help shows it: `ret name(params)` (a constructor `S(params)`, a template's eponymous
+ * function with the template's parameters after its name), each parameter as hdrgen prints it, the variadic `...`; the
+ * doc comment's summary (the template's for its function).
+ */
+function signatureInformation(fd: FuncDeclaration): SignatureInformation {
+    const tf = fd.type?.isTypeFunction() ?? null;
+    const td = fd.parent?.isTemplateDeclaration() ?? null;
+    const params = (tf?.parameterList.parameters?.opSlice() ?? []).map((p) => str(parameterToChars(p, tf!, false)));
+    if (tf !== null && tf.parameterList.varargs === VarArg.variadic)
+        params.push("...");
+    const ctor = fd.isCtorDeclaration() !== null;
+    const owner = fd.toParent()?.isAggregateDeclaration() ?? null;
+    let tparams = "";
+    if (td !== null) {
+        const printed = str(dsymbolToChars(td)).slice(identText(td.ident).length);
+        let depth = 0;
+        let close = 0;
+        while (close < printed.length && (printed[close] !== ")" || --depth !== 0))
+            depth += printed[close++] === "(" ? 1 : 0;
+        tparams = printed.slice(0, close + 1);
+    }
+    let label = ctor && owner !== null ? identText(owner.ident)
+        : `${tf?.next !== null && tf?.next !== undefined ? str(tf.next.toChars()) : "auto"} ${identText(fd.ident)}`;
+    label += `${tparams}(`;
+    const spans: [number, number][] = [];
+    params.forEach((p, i) => {
+        if (i !== 0)
+            label += ", ";
+        spans.push([label.length, label.length + p.length]);
+        label += p;
+    });
+    label += ")";
+    return { label, parameters: spans, documentation: summaryOf(td !== null && docOf(td) !== null ? td : fd) };
+}
+
+/** The doc comment's summary of `sym` as dmd's section split gives it (`DocComment.parse`), on one line; "" if none. */
+function summaryOf(sym: Dsymbol): string {
+    const doc = docOf(sym);
+    const summary = doc === null ? null : DocComment.parse(sym, doc).summary;
+    return simplifyMacros(str(summary?.body_ ?? null).replace(/\s+/g, " ").trim());
 }

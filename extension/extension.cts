@@ -1,8 +1,9 @@
 // The VS Code side: diagnostics on save and on a pause in typing for D files, compiled by djs in a worker thread, and
-// hover, go-to-definition, completion after a dot, semantic tokens, inlay hints, the dimming of inactive branches,
-// expansion peeks, the AST view and the instances and imports explorers on what the last compile analysed; the colours
-// under them come from the TextMate grammar (syntaxes/d.tmLanguage.json, code-d's) and the editing rules from
-// language-configuration.json, both declared in package.json.
+// hover, go-to-definition, the outline, the references, rename, signature help, completion (after a dot and of the
+// names in scope), semantic tokens, inlay hints, the dimming of inactive branches, expansion peeks, the AST view and
+// the instances and imports explorers on what the last compile analysed; the colours under them come from the
+// TextMate grammar (syntaxes/d.tmLanguage.json, code-d's) and the editing rules from language-configuration.json,
+// both declared in package.json.
 //
 // A CommonJS entry (VS Code's loader requires extensions); the host modules are ES modules, loaded by dynamic import.
 // Per repository, the setting `djs.ldc2Line` holds the ldc2 command of the repository's target (empty, the default:
@@ -28,6 +29,15 @@
 // and the instances explorer, whose first request after a compile costs seconds on a large module, are asked again
 // after a save's compile only (or the first compile after a worker died, which they show), and a view hidden at a
 // pause compile when it becomes visible.
+// Compile at open: a D document of a workspace folder, opened (or open at activation), is compiled as a root once an
+// editor shows it, after the pause delay, unless the last compile already analysed it (a root, or compiled through
+// `-i`): the diagnostics, hovers and outline are there without an edit or a save, and a file reached by
+// go-to-definition does not take the root away from the file it was reached from. A document opened without an editor
+// (a references peek, another extension reading it) waits until one shows it. Such a compile refreshes what a save's
+// does. Restricted Mode (package.json `capabilities.untrustedWorkspaces`, `limited`): VS Code ignores the workspace's
+// values of the settings that name a command or a path (`djs.ldc2Line`, `djs.ldcRoot`) until the folder is trusted,
+// so an untrusted folder compiles with the default line and the bundled import tree, the status bar adding
+// `, restricted`; granting trust compiles the visible D documents again with the folder's settings.
 // The worker's kept-module engine makes a compile with the previous compile's flags cost the changed root only (a
 // buffer's bytes compared with the kept module's); a compile it runs fresh says so in the status bar (`, fresh`, the
 // reason in the tooltip) and in the output channel.
@@ -36,12 +46,25 @@
 // queued (host/compiler.ts). An empty answer shows nothing; a document edited since that compile shows the worker's
 // reason as the hover (positions would be wrong), and a definition gives nothing, until its next compile has run (a
 // query waits for the compile in progress, not for one queued behind it).
-// Completion (djs 10 §4.7, "Queries"; rung 1, member completion after a dot): on `.` and on request, the members
-// visible after `expr.` at the cursor, from the last compile, stale by one compile by design: djs reads the expression
-// from the document's current text and finds its scope through the same text move the hints use, so a half-typed
-// line needs no compile of its own. Members of the type come first, then UFCS candidates, then built-in properties;
-// a miss gives no items. A position not after `expr.` (identifier characters back to a `.`) asks nothing: VS Code
-// asks a provider at every word typed, and the request would wait behind a compile in progress.
+// The outline (djs 10 §4.7, "Queries"; outline view, breadcrumbs, Go to Symbol in Editor): djs's declarations of a D
+// file of the workspace as a tree. VS Code asks a document-symbol provider again only when the document changes, so a
+// request whose document is stale while a compile of it is coming (its pause timer runs, or a compile runs or waits)
+// waits for that compile and asks again (`askCompiled`), rather than answering nothing until the next edit; otherwise
+// a miss gives nothing. Find All References (djs 10 §4.7, "Queries") waits the same way, then gives djs's references in
+// every module the last compile analysed (its roots and those `-i` compiled), the declaration's name when VS Code asks
+// for it. Rename (djs 10 §4.7, "Queries") waits the same way: djs refuses, with the reason VS Code shows, a symbol
+// whose uses it could miss (a special function, a name D calls implicitly, a declaration in a module the compile only
+// imports, a name a string mixin spells) or a name that clashes; else the edits replace its references, refused when
+// one of their documents has changed since that compile (`compiledVersions`). Signature help (djs 10 §4.7, "Queries"),
+// on `(` and `,`, waits the same way, so a call just typed is answered from its pause compile, which analyses past the
+// open parenthesis: the overload the compile picked first, the argument under the cursor.
+// Completion (djs 10 §4.7, "Queries"; rung 1, from the last compile): on `.`, the members visible after `expr.` at
+// the cursor; on request and while an identifier is typed without a dot before it, the names in scope there. Stale by
+// one compile by design: djs reads the expression from the document's current text and finds its scope through the
+// same text move the hints use, so a half-typed line needs no compile of its own. After a dot, members of the type
+// come first, then UFCS candidates, then built-in properties; without one, locals and parameters, the enclosing
+// aggregate's members, the module's names, the imported modules'. A miss gives no items. VS Code asks at the start of
+// every word typed and filters that answer as the word grows; a request made during a compile waits for it.
 // Semantic tokens (djs 10 §4.7, "Queries"; setting `djs.semanticTokens`, default on) colour a D file of the workspace
 // by what each identifier names, over the grammar's colours. The legend is djs's, which the worker sends when it
 // starts (the worker starts at activation, so that the provider can be registered with it; a worker that cannot start
@@ -110,8 +133,9 @@ import url = require("node:url");
 import type { AstAnchor } from "../host/ast.js";
 import type { DjsCompiler } from "../host/compiler.js";
 import type {
-    CompileReply, CompletionKind, Diagnostic as DjsDiagnostic, ExpansionSite, ImportModule, InlayHint as DjsInlayHint,
-    InstanceSite, PackedAst, Position, Range, Severity, TemplateInstances, TokenLegend,
+    CompileReply, CompletionKind, Diagnostic as DjsDiagnostic, DocumentSymbol as DjsDocumentSymbol, ExpansionSite,
+    ImportModule, InlayHint as DjsInlayHint, InstanceSite, PackedAst, Position, Range, Severity, SymbolKindName,
+    TemplateInstances, TokenLegend,
 } from "../host/protocol.js";
 
 type HostModules = {
@@ -137,16 +161,28 @@ let subscriptions: vscode.Disposable[];
 let tokensRegistered = false;
 /** The files each root's last compile put diagnostics on, cleared when that root compiles again. */
 const reported = new Map<string, vscode.Uri[]>();
-/** What queued a compile: a save, or a pause in typing (which refreshes less, see the header). */
-type CompileCause = "save" | "pause";
+/**
+ * What queued a compile, by rank: a pause in typing (which refreshes less, see the header), a document opened, a save.
+ */
+type CompileCause = "pause" | "open" | "save";
+const CAUSE_RANK: Record<CompileCause, number> = { pause: 0, open: 1, save: 2 };
 /**
  * The roots to compile when the current compile returns, by file URI, in queue order: a root queued again keeps its
- * place (its text is read when its compile starts), and a save of a root queued by a pause makes it a save's compile.
+ * place (its text is read when its compile starts) and the higher ranked of the two causes.
  */
 const queued = new Map<string, { folder: vscode.WorkspaceFolder; file: vscode.Uri; cause: CompileCause }>();
 let busy = false;
-/** Per document with edits not yet compiled (its URI): the compile-on-pause timer. */
+/**
+ * The version of each open D document when the last compile started (`unsavedTexts`, which hands their texts): a
+ * rename's edits are positions in the texts that compile read, so a document changed since refuses it.
+ */
+const compiledVersions = new Map<string, number>();
+/** Per document with edits not yet compiled, or opened and not yet compiled (its URI): the pause timer. */
 const pauseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** The open D documents of a workspace folder (their URIs) not yet shown in an editor since they were opened. */
+const unshown = new Set<string>();
+/** The documents (their URIs) whose open timer fired and whose check of the last compile has not yet queued them. */
+const openChecks = new Set<string>();
 /** The engine's verdict on the last compile that returned a reply (for tests). */
 let last: { mode: CompileReply["mode"]; reason: string } | undefined;
 /** Resolves when the queue is empty and no compile runs; the integration test waits on it. */
@@ -279,8 +315,12 @@ function convert(reply: CompileReply, root: vscode.Uri): Map<string, vscode.Diag
  */
 function unsavedTexts(): Record<string, string> {
     const texts: Record<string, string> = {};
+    compiledVersions.clear();
     for (const doc of vscode.workspace.textDocuments) {
-        if (isD(doc) && doc.isDirty)
+        if (!isD(doc))
+            continue;
+        compiledVersions.set(doc.uri.toString(), doc.version);
+        if (doc.isDirty)
             texts[doc.uri.fsPath] = doc.getText();
     }
     return texts;
@@ -334,20 +374,24 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     const source = reply.fromBuffer.includes(file.fsPath) ? "buffer" : "disk";
     const fresh = reply.mode === "fresh" ? ", fresh" : "";
     const defaulted = line === "" ? ", default line" : "";
+    const restricted = vscode.workspace.isTrusted ? "" : ", restricted";
     if (reply.status === 0) {
         const errors = `${reply.errors} error${reply.errors === 1 ? "" : "s"} `;
         status.text = `${reply.errors === 0 ? "$(check)" : "$(error)"} djs: ${name} ${reply.errors === 0 ? "" : errors}`
-            + `${secs} s, ${source}${fresh}${defaulted}`;
+            + `${secs} s, ${source}${fresh}${defaulted}${restricted}`;
     } else {
         status.text = (reply.status === 2 ? "$(error) djs: unsupported flag" : "$(error) djs: internal error") + fresh
-            + defaulted;
+            + defaulted + restricted;
         channel.show(true);
     }
     const why = reply.mode === "fresh" ? `Fresh compile: ${reply.reason}` : "";
     const from = buffers.length > 0 ? `Unsaved buffers, read in place of the disk: ${buffers.join(", ")}` : "";
     const how = defaulted ? `No djs.ldc2Line: the default line, ${tokens.join(" ")}. Set djs.ldc2Line to the ldc2 `
         + "command line your build uses for this repository." : "";
-    status.tooltip = [why, from, how, reply.output.slice(0, 2000)].filter((t) => t !== "").join("\n\n") || undefined;
+    const untrusted = restricted ? "Restricted Mode: the folder's djs.ldc2Line and djs.ldcRoot are ignored until you "
+        + "trust it." : "";
+    status.tooltip = [why, from, how, untrusted, reply.output.slice(0, 2000)].filter((t) => t !== "").join("\n\n")
+        || undefined;
     // the AST views and the instances explorer show WORKER_DIED since a death: the first compile after it, a pause's
     // too, refreshes them as a save's does
     const afterDeath = deadAt === generation;
@@ -357,7 +401,7 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     lensesChanged.fire();
     void dimVisible();
     importsChanged.fire();
-    if (cause === "save" || afterDeath) {
+    if (cause !== "pause" || afterDeath) {
         gateAstRefresh();
         instancesChanged.fire();
     } else {
@@ -392,8 +436,9 @@ async function drain(): Promise<void> {
 /** Queues a compile of `file` as the root, with `folder`'s command line (see `queued`), and starts the queue. */
 function queue(folder: vscode.WorkspaceFolder, file: vscode.Uri, cause: CompileCause): void {
     const key = file.toString();
-    const saved = cause === "save" || queued.get(key)?.cause === "save";
-    queued.set(key, { folder, file, cause: saved ? "save" : "pause" });
+    const before = queued.get(key)?.cause;
+    const ranked = before !== undefined && CAUSE_RANK[before] > CAUSE_RANK[cause] ? before : cause;
+    queued.set(key, { folder, file, cause: ranked });
     if (!busy)
         void drain();
 }
@@ -425,6 +470,63 @@ function onChange(e: vscode.TextDocumentChangeEvent): void {
         pauseTimers.delete(key);
         queue(folder, doc.uri, "pause");
     }, Math.max(config.get<number>("compileOnPauseDelay", 300), 50)));
+}
+
+/** Resolves when the queue is empty and no compile runs. */
+function whenIdle(): Promise<void> {
+    return busy || queued.size ? new Promise<void>((r) => idleWaiters.push(r)) : Promise.resolve();
+}
+
+/** Marks a D document of a workspace folder, just opened, for its compile at open (see the header). */
+function onOpen(doc: vscode.TextDocument): void {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        return;
+    unshown.add(doc.uri.toString());
+    onVisible(vscode.window.visibleTextEditors);
+}
+
+/**
+ * Arms the open timer of each document the editors show for the first time since it was opened; when it fires, the
+ * document is queued unless it closed or the last compile analysed it (once the compiles running or queued have
+ * returned). A pause compile armed meanwhile by an edit replaces the timer.
+ */
+function onVisible(editors: readonly vscode.TextEditor[]): void {
+    for (const { document: doc } of editors) {
+        const key = doc.uri.toString();
+        if (!unshown.delete(key))
+            continue;
+        const folder = vscode.workspace.getWorkspaceFolder(doc.uri)!;
+        const delay = vscode.workspace.getConfiguration("djs", doc.uri).get<number>("compileOnPauseDelay", 300);
+        clearPause(key);
+        pauseTimers.set(key, setTimeout(() => {
+            pauseTimers.delete(key);
+            openChecks.add(key);
+            void (async () => {
+                try {
+                    await whenIdle();
+                    const modules = await lastModules();
+                    const analysed = typeof modules !== "string" && modules.some((m) => m.kind !== "imported"
+                        && path.resolve(m.file) === doc.uri.fsPath);
+                    if (!doc.isClosed && !analysed)
+                        queue(folder, doc.uri, "open");
+                } finally {
+                    openChecks.delete(key);
+                }
+            })();
+        }, Math.max(delay, 50)));
+    }
+}
+
+/**
+ * The folder was granted trust: the settings Restricted Mode ignored now apply, and the visible D documents of the
+ * workspace compile again with them.
+ */
+function onTrust(): void {
+    for (const { document: doc } of vscode.window.visibleTextEditors) {
+        const folder = vscode.workspace.getWorkspaceFolder(doc.uri);
+        if (isD(doc) && folder !== undefined)
+            queue(folder, doc.uri, "open");
+    }
 }
 
 /**
@@ -537,21 +639,15 @@ const COMPLETION_KINDS: Record<CompletionKind, vscode.CompletionItemKind> = {
     typeParameter: vscode.CompletionItemKind.TypeParameter,
 };
 
-/** Whether `pos` follows `expr.` on its line: identifier characters (D's, Unicode letters included) back to a `.`. */
-function afterDot(doc: vscode.TextDocument, pos: vscode.Position): boolean {
-    const before = doc.lineAt(pos.line).text.slice(0, pos.character);
-    return /\.[\p{L}\p{N}_]*$/u.test(before);
-}
-
 /**
- * The completion of a D file of the workspace after `expr.` (see the header): djs's items from the last compile, kind,
- * signature and the doc comment's summary, ordered by group (members, UFCS candidates, built-in properties) then name,
- * each replacing the identifier typed after the dot. A position not after a dot, a miss of djs, a request VS Code
- * cancelled before its turn and a worker that died give nothing (undefined).
+ * The completion of a D file of the workspace, after `expr.` or of the names in scope (see the header): djs's items
+ * from the last compile, kind, signature and the doc comment's summary, ordered by djs's group then name, each
+ * replacing the identifier typed up to the position. A miss of djs, a request VS Code cancelled before its turn and a
+ * worker that died give nothing (undefined).
  */
 async function provideCompletion(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken)
     : Promise<vscode.CompletionItem[] | undefined> {
-    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined || !afterDot(doc, pos))
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
         return undefined;
     const r = await ask(() => compiler.completion(doc.uri.fsPath, doc.getText(),
         { line: pos.line, character: pos.character }, () => token.isCancellationRequested));
@@ -570,6 +666,181 @@ async function provideCompletion(doc: vscode.TextDocument, pos: vscode.Position,
         item.range = replaced;
         return item;
     });
+}
+
+/**
+ * Whether a compile of `key` (a document's URI string) is coming: its pause or open timer runs, its open check has not
+ * finished, or a compile runs or waits.
+ */
+function compileComing(key: string): boolean {
+    return pauseTimers.has(key) || openChecks.has(key) || busy || queued.size !== 0;
+}
+
+/**
+ * The reply of a query on `doc` from the compile of its current text: when the reply is a miss (its reason not empty:
+ * stale, a file just opened and not in the last compile, a position with nothing to answer) and a compile is coming
+ * (`compileComing`: a pause in typing, an open, a save), the query is asked again once the compiles have returned,
+ * until the reply is not a miss, no compile is coming, or VS Code gives up on the request. A provider without a change
+ * event (the outline, signature help) would otherwise keep the miss until the next edit.
+ */
+async function askCompiled<T extends { reason: string }>(doc: vscode.TextDocument, token: vscode.CancellationToken,
+    query: () => Promise<T | null>): Promise<T | null> {
+    const key = doc.uri.toString();
+    let r = await ask(query);
+    while (r !== null && r.reason !== "" && compileComing(key) && !token.isCancellationRequested) {
+        await (busy || queued.size !== 0 ? new Promise<void>((done) => idleWaiters.push(done))
+            : new Promise<void>((done) => setTimeout(done, 50)));
+        if (!token.isCancellationRequested && !compileComing(key))
+            r = await ask(query);
+    }
+    return r;
+}
+
+/**
+ * The references of the symbol under the cursor in a D file of the workspace (Find All References, Peek References),
+ * from the compile of the document's current text (`askCompiled`), in every module that compile analysed; the
+ * declaration's own name only when `context.includeDeclaration`. A miss of djs and a worker that died give nothing.
+ */
+async function provideReferences(doc: vscode.TextDocument, pos: vscode.Position, context: vscode.ReferenceContext,
+    token: vscode.CancellationToken): Promise<vscode.Location[] | undefined> {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        return undefined;
+    const r = await askCompiled(doc, token, () => compiler.references(doc.uri.fsPath, pos.line, pos.character,
+        doc.getText(), () => token.isCancellationRequested));
+    if (r === null || token.isCancellationRequested)
+        return undefined;
+    if (r.result === null) {
+        logQueryError(r.reason);
+        return undefined;
+    }
+    return r.result.references.filter((x) => context.includeDeclaration || !x.declaration)
+        .map((x) => new vscode.Location(vscode.Uri.file(x.file), range(x.range)));
+}
+
+/**
+ * Whether the symbol under the cursor in a D file of the workspace can be renamed, from the compile of the document's
+ * current text (`askCompiled`): its identifier and name, else an Error whose message is djs's reason, which VS Code
+ * shows (a special function, a name D calls implicitly, a declaration in a module the compile only imports, a name a
+ * string mixin spells, ...).
+ */
+async function prepareRename(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken)
+    : Promise<{ range: vscode.Range; placeholder: string } | undefined> {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        throw new Error("djs renames D files of the workspace only");
+    const r = await askCompiled(doc, token, () => compiler.rename(doc.uri.fsPath, pos.line, pos.character,
+        doc.getText(), undefined, () => token.isCancellationRequested));
+    if (r === null || token.isCancellationRequested)
+        return undefined;
+    if (r.result === null) {
+        logQueryError(r.reason);
+        throw new Error(`djs: ${r.reason}`);
+    }
+    return { range: range(r.result.range), placeholder: r.result.placeholder };
+}
+
+/**
+ * The edits renaming the symbol under the cursor to `newName`: djs's references in every module the last compile
+ * analysed, each replaced. Refused (an Error with the reason) when djs refuses the symbol or the name, or when a
+ * document of the edits has changed since that compile (`compiledVersions`): its positions would be wrong.
+ */
+async function provideRenameEdits(doc: vscode.TextDocument, pos: vscode.Position, newName: string,
+    token: vscode.CancellationToken): Promise<vscode.WorkspaceEdit | undefined> {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        return undefined;
+    const r = await askCompiled(doc, token, () => compiler.rename(doc.uri.fsPath, pos.line, pos.character,
+        doc.getText(), newName, () => token.isCancellationRequested));
+    if (r === null || token.isCancellationRequested)
+        return undefined;
+    if (r.result === null) {
+        logQueryError(r.reason);
+        throw new Error(`djs: ${r.reason}`);
+    }
+    const edit = new vscode.WorkspaceEdit();
+    for (const e of r.result.edits) {
+        const uri = vscode.Uri.file(e.file);
+        const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+        const compiled = compiledVersions.get(uri.toString());
+        if (open !== undefined && (compiled !== undefined ? compiled !== open.version : open.isDirty))
+            throw new Error(`djs: ${vscode.workspace.asRelativePath(uri)} changed since the last compile; rename `
+                + "once it has compiled");
+        edit.replace(uri, range(e.range), newName);
+    }
+    return edit;
+}
+
+/**
+ * The signatures of the call around the cursor in a D file of the workspace, on `(` and `,` and on request: djs's
+ * candidates from the compile of the document's current text (`askCompiled`: a call just typed waits for its pause
+ * compile, which analyses past the open parenthesis), the picked overload first, the argument under the cursor active.
+ * A miss and a worker that died give nothing.
+ */
+async function provideSignatureHelp(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken)
+    : Promise<vscode.SignatureHelp | undefined> {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        return undefined;
+    const r = await askCompiled(doc, token, () => compiler.signatureHelp(doc.uri.fsPath, pos.line, pos.character,
+        doc.getText(), () => token.isCancellationRequested));
+    if (r === null || token.isCancellationRequested)
+        return undefined;
+    if (r.result === null) {
+        logQueryError(r.reason);
+        return undefined;
+    }
+    const help = new vscode.SignatureHelp();
+    help.signatures = r.result.signatures.map((x) => {
+        const info = new vscode.SignatureInformation(x.label, x.documentation || undefined);
+        info.parameters = x.parameters.map((span) => new vscode.ParameterInformation(span));
+        return info;
+    });
+    help.activeSignature = r.result.activeSignature;
+    help.activeParameter = r.result.activeParameter;
+    return help;
+}
+
+const SYMBOL_KINDS: Record<SymbolKindName, vscode.SymbolKind> = {
+    module: vscode.SymbolKind.Module,
+    namespace: vscode.SymbolKind.Namespace,
+    class: vscode.SymbolKind.Class,
+    struct: vscode.SymbolKind.Struct,
+    interface: vscode.SymbolKind.Interface,
+    enum: vscode.SymbolKind.Enum,
+    enumMember: vscode.SymbolKind.EnumMember,
+    function: vscode.SymbolKind.Function,
+    method: vscode.SymbolKind.Method,
+    constructor: vscode.SymbolKind.Constructor,
+    property: vscode.SymbolKind.Property,
+    field: vscode.SymbolKind.Field,
+    variable: vscode.SymbolKind.Variable,
+    constant: vscode.SymbolKind.Constant,
+    typeParameter: vscode.SymbolKind.TypeParameter,
+};
+
+function documentSymbol(d: DjsDocumentSymbol): vscode.DocumentSymbol {
+    const s = new vscode.DocumentSymbol(d.name, d.detail, SYMBOL_KINDS[d.kind], range(d.range),
+        range(d.selectionRange));
+    s.children = d.children.map(documentSymbol);
+    return s;
+}
+
+/**
+ * The outline of a D file of the workspace (outline view, breadcrumbs, Go to Symbol in Editor): djs's declarations
+ * from the compile of the document's current text (`askCompiled`: an edited document waits for the compile its pause
+ * queues). A miss of djs (a document edited with no compile coming, a file not in the last compile) and a worker that
+ * died give nothing.
+ */
+async function provideDocumentSymbols(doc: vscode.TextDocument, token: vscode.CancellationToken)
+    : Promise<vscode.DocumentSymbol[] | undefined> {
+    if (!isD(doc) || vscode.workspace.getWorkspaceFolder(doc.uri) === undefined)
+        return undefined;
+    const r = await askCompiled(doc, token, () => compiler.documentSymbols(doc.uri.fsPath, doc.getText(),
+        () => token.isCancellationRequested));
+    if (r === null || token.isCancellationRequested)
+        return undefined;
+    if (r.symbols === null) {
+        logQueryError(r.reason);
+        return undefined;
+    }
+    return r.symbols.map(documentSymbol);
 }
 
 /**
@@ -1483,9 +1754,16 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         instancesChanged, importsChanged, instancesView, importsView,
         vscode.workspace.onDidSaveTextDocument(onSave),
         vscode.workspace.onDidChangeTextDocument(onChange),
+        vscode.workspace.onDidOpenTextDocument(onOpen),
+        vscode.workspace.onDidGrantWorkspaceTrust(onTrust),
         vscode.languages.registerCompletionItemProvider(dFiles, { provideCompletionItems: provideCompletion }, "."),
         vscode.languages.registerHoverProvider(dFiles, { provideHover }),
         vscode.languages.registerDefinitionProvider(dFiles, { provideDefinition }),
+        vscode.languages.registerDocumentSymbolProvider(dFiles, { provideDocumentSymbols }, { label: "djs" }),
+        vscode.languages.registerReferenceProvider(dFiles, { provideReferences }),
+        vscode.languages.registerRenameProvider(dFiles, { prepareRename, provideRenameEdits }),
+        vscode.languages.registerSignatureHelpProvider(dFiles, { provideSignatureHelp },
+            { triggerCharacters: ["(", ","], retriggerCharacters: [","] }),
         vscode.languages.registerInlayHintsProvider(dFiles,
             { provideInlayHints: gated("hints", provideInlayHints), onDidChangeInlayHints: hintsChanged.event }),
         vscode.workspace.registerTextDocumentContentProvider(EXPANSION_SCHEME,
@@ -1503,10 +1781,12 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         vscode.window.onDidChangeActiveTextEditor(onActiveEditor),
         vscode.window.onDidChangeVisibleTextEditors((editors) => {
             onVisibleAstViews(editors);
+            onVisible(editors);
             void Promise.all(editors.map(dim));
         }),
         vscode.workspace.onDidCloseTextDocument((doc) => {
             clearPause(doc.uri.toString());
+            unshown.delete(doc.uri.toString());
             astViews.delete(doc.uri.toString());
             astDirty.delete(doc.uri.toString());
             keptHints.delete(doc.uri.toString());
@@ -1533,9 +1813,10 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         { dispose: () => dimType.dispose() },
         { dispose: () => [...pauseTimers.keys()].forEach(clearPause) },
         { dispose: () => void compiler.dispose() });
+    vscode.workspace.textDocuments.forEach(onOpen);   // the documents open at activation, shown or not
     await registerTokens();
     return {
-        whenIdle: () => (busy || queued.size ? new Promise<void>((r) => idleWaiters.push(r)) : Promise.resolve()),
+        whenIdle,
         lastCompile: () => last,
         statusText: () => status.text,
         dimmedRanges: (uri) => dimmed.get(uri) ?? [],

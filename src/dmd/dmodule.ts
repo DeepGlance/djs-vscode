@@ -122,9 +122,9 @@ const PathSeparator = 0x2f; // '/'
 
 // dmodule.d:58-62 — `version (IN_LLVM) { extern (C++) const(char)* createTempObjectsDir(); }`.
 // resolved: version(IN_LLVM) ON, but the declaration is a bodyless `extern (C++)` binding to LDC's
-// `driver/main.cpp`; there is no D source for it and the driver is out of scope (_config.md §2), so
-// no faithful body can ever be produced by porting more D. Its ONE call site (setOutfilename,
-// dmodule.d:592) carries an excluded-module escalation stub inside the branch that reaches it.
+// driver/main.cpp:1114, so no faithful body can ever be produced by porting more D (11 §1, external
+// implementation). Its ONE call site (setOutfilename, dmodule.d:592) carries the escalation stub inside the
+// branch that reaches it, which no run of the shim enters (see there).
 
 /**
  * Remove generated .di files on error and exit. dmodule.d:64-80.
@@ -786,9 +786,10 @@ export class Module extends Package {
                 // resolved: version(IN_LLVM) ON (_config.md §1) — the tempdir fallback is KEPT
                 // (it shapes the output path), but its callee has no D source.
                 if ((dir === null || dir.length === 0) && global.params.cleanupObjectFiles) {
-                    // DJS-ESCALATE(excluded): driver/main.cpp — createTempObjectsDir() (dmd/dmodule.d:592)
-                    // LDC C++ glue, no D source, driver out of scope (_config.md §2)
-                    throw new Error("DJS-ESCALATE(excluded): driver/main.cpp — createTempObjectsDir() (dmd/dmodule.d:592)");
+                    // DJS-ESCALATE: createTempObjectsDir(), external implementation (dmd/dmodule.d:592)
+                    // Only `-cleanup-obj` and ldmd's `-run` set cleanupObjectFiles (cl_options.cpp:290,
+                    // main.cpp:514), and src/djs.ts refuses both (10 §4.2): no run of the shim gets here.
+                    throw new Error("DJS-ESCALATE: createTempObjectsDir (driver/main.cpp:1114) at dmd/dmodule.d:592");
                 }
                 //FileName::ensurePathExists(dir);
                 argdoc = FileName.combine(dir, argdoc);

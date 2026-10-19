@@ -1023,21 +1023,30 @@ Accepted (DMD spelling → what ldc2 sets): `-c`, `-o-`, `-od`, `-of`, `-op`, `-
 `-D`, `-Dd<dir>`, `-Df<file>`, `-X`, `-Xf<file>` (`-Xf-`/`-Xf=-`: stdout), `-Xi=<field>` / `-Xi <field>`
 (ldmd.cpp:655-668 passes them through, `-Xi` by its pass-through arm at :760; cl_options.cpp:295-317;
 main.cpp:356-363 sets `ddoc.dir/name/doOutput` and `json.name/doOutput`, and the loop at :403 reports
-``Error: unknown JSON field `-Xi=<field>` `` for every unknown field, then the run is fatal), `-vtls`,
+``Error: unknown JSON field `-Xi=<field>` `` for every unknown field, then the run is fatal), `-H`, `-Hd<dir>`,
+`-Hf<file>`, `-Hkeep-all-bodies` (ldmd.cpp:661-663 passes the first three through, `-inline` sets the last;
+cl_options.cpp:321-333; main.cpp:366-369 sets `dihdr.dir/name/doOutput`, :569 `dihdr.fullOutput`; main.d writes
+the `.di` files), `-mixin=<file>` / `-mixin <file>` (cl_options.cpp:375, ldmd.cpp:575; main.cpp:376 sets
+`mixinOut`, and main.d's scope exit writes the file), `-deps` / `-deps=<file>` (cl_options.cpp:452, ValueOptional:
+never the next argument; main.cpp:379 sets `moduleDeps` with a buffer, written to the file or, without one, to
+stdout), `-noasm` (cl_options.cpp:254, `useInlineAsm` off), `-vtls`,
 `-vtemplates[=list-instances]`, `-verrors=N|spec|simple|context`, `-verror-style=`,
 `-verror-supplements=`, `-unittest`, `-release`, `-betterC`, `-allinst`, `-main`, `-ignore`, `-shared`,
 `-nothrow`, `-O*`, `-inline`, `-dip25/-dip1000/-dip1008`, `-cov[=N|ctfe]`, `-profile`, `-checkaction=`,
+`-edition[=NNNN[<file>]]` (main.cpp:107, ldcbindings.d:87 `parseEditionOption`; ldmd.cpp:525 makes a bare
+`-edition` `-edition=`, the default edition; a bad value is `Error: Invalid argument for '-edition': <v>`),
 `-check=`, `-boundscheck=`, `-noboundscheck`, `-extern-std=`, `-identifiers[-importc]=`,
 `-transition=/-preview=/-revert=` (comma lists), `-P<flag>` / `-P=<flag>` / `-P <flag>` (cl_options.cpp:449
 `cppSwitches`, passed through by ldmd2, ldmd.cpp:743; each value goes to the C preprocessor in order,
 cpreprocessor.cpp:85).
 ldc2's own spellings, which ldmd2 passes through unchanged (ldmd.cpp:760; ldc2's LLVM cl reads `--<name>` as
 `-<name>`): `--checkaction=`, `--i`, `--preview=`, `--release`, `--revert=`, `--transition=`, `--unittest`,
-`--vcolumns` (the same options as their one-dash forms), `-d-version=`/`--d-version=` (as `-version=`),
-`-d-debug[=x]`/`--d-debug[=x]` (as `-debug[=x]`), and `-gcc=<cc>`/`-gcc <cc>`/`--gcc…` (tool.cpp:41, the last
-occurrence winning): the C compiler ImportC's preprocessor runs, found on the PATH (tool.cpp:164 getCCImpl; an
-unknown one is `Error: cannot find program`, then fatal). Any other `--<name>` stops the run: `--version` is LLVM's
-own option, not ldmd2's `-version=`. These are the spellings of yab's ldc2 lines (yab melkor.d, adhoc.d).
+`--vcolumns`, `--deps[=<file>]` (the same options as their one-dash forms), `-d-version=`/`--d-version=` (as
+`-version=`), `-d-debug[=x]`/`--d-debug[=x]` (as `-debug[=x]`), and `-gcc=<cc>`/`-gcc <cc>`/`--gcc…` (tool.cpp:41,
+the last occurrence winning): the C compiler ImportC's preprocessor runs, found on the PATH (tool.cpp:164
+getCCImpl; an unknown one is `Error: cannot find program`, then fatal). Any other `--<name>` stops the run:
+`--version` is LLVM's own option, not ldmd2's `-version=`. These are the spellings of yab's ldc2 lines (yab
+melkor.d, adhoc.d).
 djs's own switch, no ldc2 option: `--djs-ldc=<root>`, an absolute path to an ldc2 1.43.0 install laid out as LDC's
 release archives (a root without `import/object.d` stops the run). The import directory is then
 `<root>/bin/../import` and the config file `<root>/etc/ldc2.conf`, spelled as that ldc2 prints them; without it, the
@@ -1048,13 +1057,28 @@ the runners that compare with ldmd2 pass it with the oracle's install.
 spellings), or an arm64 Mac triple (`arm64-apple-darwin24.0.0`, `aarch64-apple-macos`, ...): the target of §4.8;
 any other triple stops the run, and `-m64` beside `-mtriple` is ldc2's error
 (main.cpp:1205), then fatal.
+`-mcpu=<v>` as ldmd2 translates it (ldmd.cpp:619-634): `baseline` is dropped; `avx` and `avx2` are `-mattr=+avx` and
+`-mattr=+avx2`, accumulated in order; `native` and any other value (the Lerror pass-through) set ldc2's CPU, the last
+occurrence winning, an empty value meaning the triple's default. `native` is LLVM's `getHostCPUName()`: `sysctl
+hw.cpufamily` on an arm64 Mac, of which only the M2 family (0xda33d83d, `apple-m2`) is modelled, with no host
+features (probed); on any other host `-mcpu=native` stops the run. The resulting CPU and features make the target
+machine of gen/ldctraits.ts `createTargetMachine` (targetmachine.cpp:441 with LDC's `+cx16` for `x86-64`, LLVM's CPU
+lookup and feature flags): `__traits(targetCPU)` answers the CPU name, `__traits(targetHasFeature)` its feature bits,
+`D_AVX`/`D_AVX2` follow them on x86_64 (main.cpp:805-808), and LLVM's warnings go to stderr before the frontend runs,
+as ldc2 prints them (an unrecognised CPU name before and after the feature flags, an unrecognised feature once). The
+CPUs with ldc2-probed tables: on AArch64 `generic`, `apple-m1` to `apple-m5`, `cortex-a53`, `-a72`, `-a76`, `-a78ae`;
+on x86_64 `x86-64`, `x86-64-v2`, `-v3`, `-v4`; and, as names that backend does not recognise, the other arch's
+(`-mcpu=native` under x86_64-linux-gnu is `apple-m2`, unrecognised there). Any other CPU name stops the run, since
+LLVM recognises names its `-mcpu=help` list omits (`apple-latest`); `-mcpu=help`, `?` and `h` stop it too.
 Accepted without effect: `-m64` (without `-mtriple`), `-fPIC`, `-lowmem`, `-quiet`, `-mcpu=baseline`, `-L*`,
-`-defaultlib=`, `-debuglib=`, `-disable-linker-strip-dead`, `-g/-gc/-gf/-gs`, `-color=off`, `-conf=`.
-Every other switch stops the run (§4.1). `-I`, `-J`, `-od`, `-of`, `-Dd`, `-Df`, `-Xf` and `-Xi` with nothing
-attached take the next argument, as LLVM does. An empty `-od=`/`-of=`/`-Dd=`/`-Df=`/`-Xf=` is
-`Error: Expected argument to '-<name>'` (cl_helpers.cpp `fromPathString`), in main.cpp's order. `-D=<bool>`,
-`-X=<bool>` and `-Xi<field>` (an unknown argument to ldc2) stop the run. The last `-O<level>` wins, and
-`-O0` leaves `D_Optimized` off. A response file (`@file`) stops the run.
+`-defaultlib=`, `-debuglib=`, `-disable-linker-strip-dead`, `-g/-gc/-gf/-gs`, `-color=off`, `-conf=`, `-nogc`
+(gen/runtime.cpp:45, read only while generating code, which the shim never does).
+Every other switch stops the run (§4.1), among them the C++ headers (`-HC`, `-HCd`, `-HCf`: dtoh.d), `-makedeps`,
+`-lib` and `-m32`. `-I`, `-J`, `-od`, `-of`, `-Dd`, `-Df`, `-Xf`, `-Xi`, `-Hd`, `-Hf` and `-mixin` with nothing
+attached take the next argument, as LLVM does. An empty `-od=`/`-of=`/`-Dd=`/`-Df=`/`-Xf=`/`-Hd=`/`-Hf=`/`-mixin=`
+is `Error: Expected argument to '-<name>'` (cl_helpers.cpp `fromPathString`), in main.cpp's order; an empty
+`-deps=` is a `-deps` to stdout. `-D=<bool>`, `-X=<bool>` and `-Xi<field>` (an unknown argument to ldc2) stop the
+run. The last `-O<level>` wins, and `-O0` leaves `D_Optimized` off. A response file (`@file`) stops the run.
 
 ### 4.3 Diagnostic plumbing in the shim
 
@@ -1167,7 +1191,7 @@ that target.
 ### 4.6 The Phobos runner
 
 `tests/phobos/run.ts` compiles every module of ldc2's shipped import tree (object.d, core/, std/,
-etc/, ldc/; `.d` and `.di`; importc.h is SKIP-IMPORTC; ldc/opencl.di, and any module under a directory
+etc/, ldc/; `.d`, `.di` and the C header importc.h, through ImportC; ldc/opencl.di, and any module under a directory
 whose name starts with `ldc/dcompute`, is SKIP-DCOMPUTE, since DCompute semantic (gen/semantic.d:20) is not
 ported, and the summary's Notes section gives one line per skip class) as a root module with
 `-c -o- -vcg-ast`, through
@@ -1277,7 +1301,14 @@ field it uses changed.
 - `queryInstances(files)` and `InstancesAnswer`, `InstancesResult`, `TemplateInstances`, `InstanceSite`.
 - `queryImports()` and `ImportsAnswer`, `ImportsResult`, `ImportModule`.
 - `queryCompletion(file, text, position)` and `CompletionAnswer`, `CompletionResult`, `CompletionItem`,
-  `CompletionKind`: the names after a `.` ("Queries" below).
+  `CompletionKind`, `CompletionGroup`: the names after a `.`, and in scope where no `.` precedes ("Queries" below).
+- `queryDocumentSymbols(file, text)` and `DocumentSymbolsAnswer`, `DocumentSymbolsResult`, `DocumentSymbol`,
+  `SymbolKindName`: the outline ("Queries" below).
+- `queryReferences(file, line, character, text)` and `ReferencesAnswer`, `ReferencesResult`, `ReferenceSite`.
+- `queryPrepareRename(file, line, character, text)`, `queryRename(file, line, character, text, newName)` and
+  `PrepareRenameAnswer`, `PrepareRenameResult`, `RenameAnswer`, `RenameResult`.
+- `querySignatureHelp(file, line, character, text)` and `SignatureHelpAnswer`, `SignatureHelpResult`,
+  `SignatureInformation`.
 - `setDiagnosticHandler` and the `DiagnosticHandler` signature (dmd/errors.ts, `errors.d:401-408`): called by
   `printDiagnostic` with the header `Error: `, `Warning: `, `Deprecation: `, `  Tip: `, or seven spaces for a
   supplemental line; answering true suppresses the print and the source-line context. The handler is not reset by
@@ -1299,7 +1330,8 @@ Changes per baseline:
   explorers); the text override `DjsOptions.texts` and the completion query (its compile on pause and its
   `completion` request); the import tree bundled with djs in place of the Prefix install's, and `--djs-ldc=<root>`
   (the extension's `djs.ldcRoot`); the host's triple from Node's platform and arch, with an unsupported host refused
-  without `-mtriple`, and the arm64 Mac accepted as a `-mtriple` (§4.8; the extension's `djs.target`).
+  without `-mtriple`, and the arm64 Mac accepted as a `-mtriple` (§4.8; the extension's `djs.target`); the completion
+  without a dot (the same `completion` request answers with the names in scope, `CompletionItem.group` 3 added).
 
 **The text override.** `DjsOptions.texts` (src/djs.ts), a map from absolute path to a D source's text (an editor's
 buffer, no byte order mark), replaces those files' contents for one call of `djsMain` or `djsMainKept`: a module whose
@@ -1369,16 +1401,34 @@ Guarantees, the merge gate (ruling of Paolo 9/10):
   fewer (`int a : 3; int : 5; int b;`: `S.tupleof[2]` is out of bounds kept, not fresh). Finalizing a D aggregate's
   size is not a unit, so nothing takes it back; a fix needs shadow state for `sizeok` and `fields` and finalization
   run again where a fresh compile runs it. An unchanged recompile is unaffected (the reading unit replays).
-- **Known divergence: the error state.** Some frontend tests read whether any error was reported (`global.errors`):
-  `needCopyOrMoveCtor` (`clone.d:1688`), the deferred semantic2/semantic3 loops (`dsymbolsem.d:819`, `:837`),
-  `templatesem.d:3001`, `typesem.d:4405`. A unit recorded in a compile without errors replays as it ran, where a fresh
-  compile that has already reported an error skips that analysis. In editor mode a kept compile of a root with a parse
-  error (the pause compile of a half-typed line), after a good compile, can print a deprecation the fresh compile does
-  not (dgpro07 labsensor: `struct CameraRecorder` "implicitly-generated postblit hides copy constructor") and leave
-  other symbols analysed (druntime's `_d_aaEqual` instances: the AST view differs). Rejected fixes: dropping the units
-  that cross those tests sent a kept labserver compile after a semantic error in the root fresh (48-53 s); analysing
-  past a returned `fatal()` as without errors hid gagged errors and asserted in `findMoveAndCopyConstructors` on a
-  struct with a member named `__ctor`.
+- **Dropped where it skipped analysis after an error.** Some frontend tests read whether any error was reported
+  (`global.errors`) and skip analysis when one was. A unit that ran where the count was above zero only from errors
+  reported ungagged before it, and whose skipped analysis had a result, is dropped by the next compile and runs again
+  (keep.ts `keepErrorState`): an instance made after the root's error looked for no copy constructor (`clone.d:1688`,
+  where the struct has a constructor or a field with a copy or move constructor, clone.ts `keptCtorsSkipped`; none
+  generated, the postblit's deprecation not printed) or did not report a `__traits` that gives no type
+  (`typesem.d:4405`). A library struct whose `isPOD` answer another module's analysis cached after an error
+  (`dsymbolsem.d:1696`, the same test) drops its module. It covers the CLI path (a compile stopped by a semantic error,
+  then the root fixed) and the compile after an editor's fresh compile of a broken buffer. Its cost falls on that
+  compile: dgpro07 labsensor, a fresh compile of the root with a parse error, then the fixed root: the drop seeds 29
+  containers and the kept compile aborts (a lookup into a kept module before its semantic), 17.1 s with the fresh
+  compile that follows against 0.7 s kept, at load 5; the next compile keeps (0.7 s).
+- **Known divergence: the error state.** The reverse: a unit recorded where the count was zero replays as it ran in a
+  compile that has already reported an error, where a fresh compile skips that analysis, and a struct's `isPOD` answer
+  cached by a compile without errors answers one with errors. In editor mode a kept compile of a root with a parse error
+  (the pause compile of a half-typed line), after a good compile, prints a deprecation the fresh compile does not
+  (dgpro07 labsensor: `struct CameraRecorder` "implicitly-generated postblit hides copy constructor") and its AST view
+  differs (generated names numbered otherwise). The CLI path reaches it too, where the output is ldc2's: an instance
+  kept from a good compile and first requested after the root's semantic error prints the postblit's deprecation, which
+  ldc2 does not, and `__traits(isPOD, S)` of a struct with a copy constructor, asked after the error, answers `false`,
+  where ldc2 answers `true`. Outside every unit, the end-of-compile semantic3 loop (`dsymbolsem.d:837`) stops at its
+  first entry after an error, and the kept instances it skips keep their analysed bodies: after an error in the root,
+  the AST view shows druntime's `_d_aaEqual` instances analysed, where a fresh compile leaves them unanalysed (the
+  output is a fresh compile's). The other tests of the count, the semantic2 loop (`dsymbolsem.d:819`, reached inside the
+  root's semantic3 only) and `templatesem.d:3001`, no reproducer shows changing a kept unit. Rejected fixes: dropping
+  the units that cross those tests sent a kept labserver compile after a semantic error in the root fresh (48-53 s);
+  analysing past a returned `fatal()` as without errors hid gagged errors and asserted in `findMoveAndCopyConstructors`
+  on a struct with a member named `__ctor`.
 - **A visible fallback.** Whenever the call compiles fresh it says why (`reason`): the first call, `the command line
   changed`, `the host options changed` (`DjsOptions.docComments`; not `texts`), `refused flag <f>: <why>`, `a C
   source file on the command line`, `the C preprocessor writes for <file>` (its output goes to the inherited stderr,
@@ -1441,7 +1491,13 @@ type's TypeInfo, the `minst` an AA TypeInfo's semantic3 sets on its instances (`
 its first merge of each AA type table entry with the merging type's `loc`, and notes what else its result depends on:
 its string imports' searches and files, its failed module imports, the clock, the working directory, the
 generated-identifier counter at its entry; and the type table entries it creates over a non-canonical type (`&f` of a
-function whose type the analysis changed after merging it), which leave the table with it. The next compile resets each
+function whose type the analysis changed after merging it), which leave the table with it. A unit that retries the
+deferred symbols (`runDeferredSemantic`, `dsymbolsem.d:760`) and whose own work leaves them as they are (each retry it
+ran did no work, and it deferred nothing itself) holds nothing of them in its log: it replays under other deferred
+symbols than recorded (an import added whose struct waits for another's size while a kept instance is first requested,
+or dropped again), and retries this compile's ones at the end of its replay, where a retry that does no work proves that
+the fresh compile's retries inside the unit did none, since a deferred symbol's analysis only gets further as the work
+around it goes on (keep.ts `probeRetry`); its record then names this compile's symbols. The next compile resets each
 kept unit's guard to its value before the unit (the shadow state), so every caller that would run it reaches it, and its
 first request replays the log there. A function's semantic3 that inferred its return type has a second guard, the return
 type itself, which the shadow state does not take back (the function's type keeps what its analysis set): while that
@@ -1477,9 +1533,12 @@ keep.ts `keepRTInfo`).
 Abort: a kept compile buffers stdout, stderr and the handler's calls. A replay that finds the kept state wrong for this
 compile (a request in another state than recorded: an import cycle entered from the other side, with output; a gag or
 `-de` state or an instance's `gagged` other than recorded, with output; other deferred symbols than recorded at a unit
-that defers; a printed generated name (`__r3`) while the generated-identifier counter differs from the recording's at a
-replayed unit or registered parse that consumed some, found at that unit's replay or, when the difference comes later,
-at the end of the compile; at the end of the compile, a string this compile made, by a unit run or replayed, that names
+whose own work changes them, or whose retry of this compile's ones, at the end of its replay, does work (a symbol
+analysed already that a kept module's replay puts back among them, where a fresh compile's is still deferred: an import
+dropped and added again); a printed generated name (`__r3`) while the generated-identifier counter differs from the
+recording's at a replayed unit or registered parse that consumed some, found at that unit's replay or, when the
+difference comes later, at the end of the compile; at the end of the compile, a string this compile made, by a unit run
+or replayed, that names
 a generated identifier by the number its recording gave it where this compile gave it another (`__traits(allMembers)` of
 a kept struct with an anonymous bit-field, `__anonBitField3`; a kept lambda's `.stringof` with its `__T4`: the StringExp
 constructor's hook keeps the strings that look generated, `keepString`, and their words are looked up among the
@@ -1506,13 +1565,17 @@ its parse's; a WeakMap, so an entry goes with its dropped symbol; only -D and -X
 is reset as for a fresh compile.
 
 The proofs: src/keep.test.ts (each kept compile against `djsMain`: a library deprecation with its trace after the root
-moved, the four edit patterns of §4.6, a root changed to a module importing it, a kept module edited, dip1000, the
-parse's generated names, a module first reached through another import, a package.d after its submodules, a kept
+moved, the four edit patterns of §4.6, an instance made after an error in the root and made again once it is fixed
+(`clone.d:1688`, `typesem.d:4405`) and a library struct's `isPOD` answered after an error, a root changed to a module
+importing it, a kept module edited, dip1000, the parse's generated names, a module first reached through another import,
+a package.d after its submodules, a kept
 module's import whose package another import had put in the tree, a module's location, a function pointer type of the
-previous root, deferred semantic3, a module appearing, an edited root still calling an imported `auto` function, `-i` (a
-compiled import's bodies with the root and then the compiled import edited, an import added then dropped, `-i=`
-patterns, the root inferring a compiled import's `auto` function and method before its semantic3), string imports, the
-clock, the working directory, a C module edited and one imported for the first time, the diagnostic handler's calls, an
+previous root, deferred semantic3, a module appearing, an import added whose struct is deferred where a kept instance
+that retries the deferred symbols is first requested, then dropped, an edited root still calling an imported `auto`
+function, `-i` (a compiled import's bodies with the root and then the compiled import edited, an import added then
+dropped, `-i=` patterns, the root inferring a compiled import's `auto` function and method before its semantic3), string
+imports, the clock, the working directory, a C module edited and one imported for the first time, the diagnostic
+handler's calls, an
 unchanged recompile of seven dmd corpus cases (a root that is its own `object` with an AA type and a
 `TypeInfo_AssociativeArray` without the hooks, two; a selective import of members not visible under `-de`; an overload
 set across two imports; C structs of one name from two imports, a bit-field's name differing; a root module whose name
@@ -1526,10 +1589,11 @@ renumbering nothing with a parse inside a unit's numbers, a kept C module whose 
 a kept compile whose preprocessor writes, an instance created by a request in one compile and matched by it in the next
 or the reverse, under `-i` and with two command-line roots, two C modules' types of one name, two C shims including one
 header, a C struct merged with a kept one whose size a fresh compile has not finalized there, a root added that names a
-kept root as its package, an imported module named as a package after its importAll, the abort path); the corpus
-`--in-process --keep` (§4.5), which also exercises what has no test of its own (a module's resolution changed, the lazy
-alias unit, the `minst` writes an AA TypeInfo's replay makes, the deferral its creation's replay skips; a crash during a
-kept compile has no reproducer), and its `--recompile` lane, alone and with `--editor`, which compiles every test again
+kept root as its package, an imported module named as a package after its importAll, that import added again, whose kept
+module puts back a deferred symbol analysed already, the abort path); the corpus `--in-process --keep` (§4.5), which
+also exercises what has no test of its own (a module's resolution changed, the lazy alias unit, the `minst` writes an AA
+TypeInfo's replay makes, the deferral its creation's replay skips; a crash during a kept compile has no reproducer), and
+its `--recompile` lane, alone and with `--editor`, which compiles every test again
 unchanged in the same child: every kept second compile prints what the first printed (under `--editor`, four tests that
 stop at a known non-return of editor mode, above, differ between two fresh compiles); the edit list of
 tests/phobos/editloop.ts through `--sequence ... --keep` (§4.6); and the dgpro07 labserver probe (a fresh compile ~29-31
@@ -1548,8 +1612,10 @@ edits under `-i` are keep.test.ts's and the five modules'.
 
 `queryHover(file, line, character, text)`, `queryDefinition(file, line, character, text)`, `querySemanticTokens(file,
 text)`, `queryInlayHints(file, text, range)`, `queryInactiveRanges(file, text)`, `queryExpansionSites(file, text)`,
-`queryExpansion(file, range, text)`, `queryAst(file, text)`, `queryInstances(files)`, `queryImports()` and
-`queryCompletion(file, text, position)` (src/query.ts, exported by src/djs.ts) answer on the analysed AST the last
+`queryExpansion(file, range, text)`, `queryAst(file, text)`, `queryInstances(files)`, `queryImports()`,
+`queryCompletion(file, text, position)`, `queryDocumentSymbols(file, text)`, `queryReferences(file, line, character,
+text)`, `queryPrepareRename(file, line, character, text)`, `queryRename(file, line, character, text, newName)` and
+`querySignatureHelp(file, line, character, text)` (src/query.ts, exported by src/djs.ts) answer on the analysed AST the last
 compile left, whatever it was (`djsMain` or `djsMainKept`, fresh or kept, from the disk or a host's texts), between
 compiles. That is what "the last good index" means for a host: the queries answer from the last compile that analysed
 the file, and a compile never leaves an older one behind. In editor mode a compile of a half-typed buffer analyses the
@@ -1574,8 +1640,10 @@ by `DocComment.parse` (dmd/doc.d:234) and rendered (summary, description, Params
 and other sections by name; `$(D x)`, `$(D_PARAM x)`, `$(REF x, ...)`, `$(LREF x)` as code, other macros as their
 arguments' text); a member of a template instance, whose copy carries no comment, shows its template's; a `ditto`
 comment shows the previous documented declaration's in the same scope. A definition carries the declaring file as the
-compiler names it and the declaration's identifier; a module, its file's start; a symbol without a location or declared
-in a string mixin, no answer.
+compiler names it and the declaration's identifier; a module, its file's start; a symbol declared in a string mixin,
+its name inside the mixin's literal when that literal is the mixin's whole argument and holds no escape sequence (the
+bytes the mixin parsed), else the `mixin` keyword when its line has one; a symbol without a location, or one of a
+string built elsewhere on a line of several mixins, no answer.
 
 A hover's last section, after a `---` line, headed `**Resolved**`, says what the analysis made of the code at the
 token, each part a label and a ` ```d ` block printed by hdrgen from the analysed nodes, never rebuilt from the text,
@@ -1596,7 +1664,8 @@ to `void`, not of a literal, not one written). A call prints through its instanc
 ones (`to!string`, not the `to!uint` it holds; `apply!(x => x + k)`, whose inner instance's parent is the function of
 the local argument), a prefixed object in parentheses, its arguments through hdrgen. A part whose text names a
 compiler's temporary (`cast(int)__r12.length` at an array's `foreach`) is not shown, but for a lowered `foreach`. The
-first part of the hover is unchanged; a call to the only overload as written gets no section. A token where a lowering
+first part of the hover is unchanged; a call to the only overload as written gets no section. A `Lowered:` part that
+calls a function (an operator's overload, `opApply`) is followed by its doc comment's summary. A token where a lowering
 sits and no identifier (an operator, also right after one, `a+b`, `a[1]`: tried before the step back to the identifier)
 or no symbol (`foreach`, `new`, `cast`) answers with the section alone, kind `operator`, `statement` for `foreach`,
 `expression` for another word, the token's range. Not
@@ -1791,7 +1860,8 @@ from the compiled one. `items`, one per name, sorted by group then label: `{ lab
 }`, `kind` an LSP name (`method`, `function`, `field`, `property`, `variable`, `constant`, `enumMember`, `enum`,
 `struct`, `class`, `interface`, `module`, `typeParameter`), `detail` the hover's signature on one line (`(+N overloads)`
 after a member function's first overload), `documentation` the doc comment's summary as `DocComment.parse` splits it
-(the hover's), on one line. Group 0, the members: a value of aggregate type (through a pointer; an enum value as its
+(the hover's), on one line: of the overload the item shows (a UFCS candidate's, the one taking the receiver), else of
+the name. Group 0, the members: a value of aggregate type (through a pointer; an enum value as its
 base type) every member of its table, its template mixins' and base classes' (object.Object's for a class) and, one
 level, its `alias this`'s, and of its methods only those callable on it, mutable or not (static, or declared with a
 `this` qualifier the value's converts to: no `immutable` method on a mutable value); a type its static members, an enum
@@ -1814,9 +1884,9 @@ a plain class value. Group 2, the built-in properties of the spec's fixed lists:
 `max` (an enum value's typed as the enum); a floating type's `infinity`, `nan`, `dig`, `epsilon`, `mant_dig`,
 `max_10_exp`, `max_exp`, `min_10_exp`, `min_exp`, `max`, `min_normal`, `re`, `im`; a class's `classinfo`; an aggregate's
 `tupleof`; the detail the type where the spec fixes it. Misses: the file is not in the last compile; the position is
-outside the text; no `.` before the position (past the identifier being typed); the dot in a comment or a literal, or
-after a number; the function at the moved position not analysed; the expression not resolved (``the expression before
-the `.` is not resolved: <the link and why>``), or resolved to different types by a template's instances: never a guess.
+outside the text; the dot in a comment or a literal, or after a number; the function at the moved position not
+analysed; the expression not resolved (``the expression before the `.` is not resolved: <the link and why>``), or
+resolved to different types by a template's instances: never a guess.
 Not covered: a template instance (`Box!int.`), a call with arguments, a basic type's keyword (`int.`), a builtin
 property as a link (`a.length.`), a bare leading `.` (no link after it). Cost, dgpro07 labserver.d under `-i`, at a load
 of 4: ~50 ms when the request builds the file's index; after it a struct value's 35 items (28 members) ~3 ms, std.file's
@@ -1827,6 +1897,92 @@ table lookups per link each, stopping at the first disagreement; what the copies
 std/format/internal/write.d's every `.`, 1757 requests, ~0.5 ms mean, ~12 ms the slowest after the index build
 (`getNth`'s body ~5 ms); every `.` of the compile's 349 files, 138767 requests, none over 71 ms (an index build), and
 the kept compile after them equal to the one before.
+
+The names in scope, the same `queryCompletion(file, text, position)` where no `.` precedes the identifier being typed (a
+`..` is a slice's, not a member access) or nothing is typed: `{ result: { range, items, moved } }`, `range` the
+identifier typed up to the position (empty with nothing typed). The scope is found as after a dot, at the position moved
+through the two texts (of a template's instances, the first analysed copy), and the answer is the last compile's: a
+local typed since is offered after the next one. One item per name, the innermost declaration winning, sorted by group
+then label. Group 0, the locals and parameters of the functions holding the position, a nested function's then its
+enclosing ones' (those the walk met and, at their own locations, those of the function's table it did not: a body with
+errors, nested functions and aggregates), declared before the position in a block still open there (on the text: no `}`
+closing it in between) or, declared in a statement's parentheses (`foreach (x; ...)`, `if (auto x = ...)`,
+`catch (E e)`), within that statement; a template instance's parameters (`T`); a function-local renamed import's name
+(`io` of `import io = ...;` before the position). Group 1, the members of the aggregate whose member function holds the
+position: `this`'s as `this.` gives them (the methods its qualifier may call, its `alias this`'s), a static member
+function's static members. Group 2, the module's own members, private ones included, and the names its imports declare
+(`std` of `import std.stdio;`, `io` of a renamed import, a selective import's name). Group 3, the members of the modules
+it imports visible from it (visibility as after a dot), their public imports followed, object.d's included, and of the
+function-local imports before the position (a selective one's names). Not the keywords (the grammar's), nor the
+compiler's names. Each item as after a dot: kind, the hover's signature on one line with `(+N overloads)` after a
+function's, the doc summary. Misses: the position in a comment or a literal, or in a number; the function at the moved
+position not analysed. Cost, dgpro07 labserver.d under `-i`, at a load of 25 to 45: ~1520 items (3 to 9 locals, 146
+module names, ~1375 imported); the first request after a compile ~80-115 ms besides the index build (~130-165 ms at that
+load), each module's entries listed once per compile and an item printed at its first need; later requests ~2-10 ms in
+djs-vscode's worker, ~5-45 ms round trip (the items copied back); RSS +5 MiB.
+
+The outline of a file, `queryDocumentSymbols(file, text)`: `{ result: { symbols } }` or the misses of the whole-file
+queries (not in the last compile; `stale`). A symbol is `{ name, kind, detail, range, selectionRange, children }`,
+each level sorted by position; `kind` is LSP's name (`module`, `namespace`, `class`, `struct`, `interface`, `enum`,
+`enumMember`, `function`, `method`, `constructor`, `property`, `field`, `variable`, `constant`, `typeParameter`), the
+selection the declaration's name, the range from the first token of its line (back to a `;` or a brace) to the end of
+its block or its `;`. The tree comes from the module's members as the compile left them: the module declaration, one
+`imports` node per scope, aggregates, enums, templates and template mixins with their members, functions with the
+functions, aggregates, enums and templates their bodies declare (from the index: of every analysed copy, none in a body
+no analysis ran), variables, aliases, enum members, and the special functions by their D spelling (`this`, `~this`,
+`this(this)`, `static this`, `invariant`, `unittest`). A template with an eponymous member is one node of the member's
+kind, its parameters before the member's detail; another template is a `namespace`. Attributes are transparent; of a
+`version`, `debug` or `static if` only the branch the analysis chose (both when none was decided, as in a template's
+members): a declaration in a branch not chosen is absent, as it has no semantic tokens. A `static foreach` gives its
+expanded members, a string mixin its declarations at its own range with `(mixin) ` before their detail, a template
+mixin its members at its range. The detail, cut at 60 characters: a function's type, a variable's, an enum's base
+type, an enum member's initializer as written, an aggregate's bases, an alias's target, a template's parameters. The
+compiler's names and the functions it generates (a struct's `opAssign`) are not shown.
+
+The references of the symbol at a position, `queryReferences(file, line, character, text)`: `{ result: { name,
+references } }` or the hover's misses; a reference is `{ file, range, declaration }` (the file as the compiler names
+it, the identifier, whether it is the declaration's own name), sorted by file and position. The modules searched are
+those the last compile analysed: its roots and the modules `-i` compiled, not those only imported, whose function bodies
+no analysis ran. The target is the token's symbol as the semantic tokens find it (the index's hit, else the read-only
+fallback: a folded enum member or manifest constant is found), a template instance standing for its template, a
+constructor named by its aggregate's name (`S(1)`, `new S`) for the aggregate; or a template's parameter, when the token
+is in the extent of a template declared in the file that declares that name and is not after a `.`. A symbol is
+identified by its declaration's identifier, so a template's member and its copies in every instance, a function
+template and its instances' functions, are one; one without a location (or declared in a string mixin) by itself, a
+string mixin's declaration listed at its name inside the literal where the definition finds it there. Every
+occurrence of the name in code is a reference when a hit there, or the token's symbol, has the target's identity (or
+is a constructor of the target's aggregate): a call through UFCS, a property call, a member of an instance, a selective
+import's name, the target of an alias as written. A template parameter's references are the occurrences of its name in
+the template, outside a nested template that declares the same name. Not found: uses in a module only imported, in a
+branch not chosen, in a body no analysis ran (a template without instances), names spelled by a string mixin's text,
+and implicit uses with no token of the name (an operator's `opBinary` at `+`, a `foreach` range's `front`). Cost: the
+index of each analysed module whose text holds the name (built by the first query on it after a compile), then one
+lookup per occurrence.
+
+A rename, `queryPrepareRename(file, line, character, text)`: `{ result: { range, placeholder } }`, the identifier and
+its text, or a miss whose reason says why it cannot be renamed; `queryRename(file, line, character, text, newName)`: `{
+result: { newName, edits } }`, an edit `{ file, range }` per reference of `queryReferences` (the declaration's name
+included), each replaced by the new name. Refused, so that no use is left behind: a module or package (renamed with its
+file); a constructor or another special function; a name D calls with no token of its own (the `op` names, a range's
+`front`, `back`, `empty`, `popFront`, `popBack`, `save`, `length`, `toString`, `toHash`); a symbol declared in a string
+mixin or without a declaration; one declared in a module the last compile only imports (the bundled import tree, a
+module outside `-i`), whose other users no analysis saw; a name that a string mixin's text spells as a word in a
+searched module (a token string, or a literal in a `mixin (...)`'s arguments: a string built elsewhere and mixed in is
+not seen). The new name must be a D identifier, not a keyword, not starting with `__`, and not one the symbol's scope
+already declares (a template parameter's: not spelled in the template); a clash among a function's locals is not
+checked, and the next compile reports it.
+
+The signatures of a call, `querySignatureHelp(file, line, character, text)`: `{ result: { signatures, activeSignature,
+activeParameter } }` or the hover's misses, `not inside a call's parentheses`, `no function at the call`. The call is
+the innermost `(` open at the position (found backwards over the code, up to the statement's start), its callee the
+identifier before it (past `!arg` or `!(...)`). The signatures: the function the compile resolved the call to first
+(an instance's function when it instantiated a template: its types substituted), then the rest of the name's overload
+set, a template not instantiated for the call as its eponymous function with its parameters as written; with no
+resolved call (a call being typed, compiled past the parse error in editor mode) the overload set of the symbol at the
+callee; an aggregate's name gives its constructors. A signature is `{ label, parameters, documentation }`: `ret
+name(params)` (a constructor's `S(params)`, a template's parameters after the name), each parameter as hdrgen prints it
+with its span in the label, the doc comment's summary. The active parameter counts the commas at the call's depth
+before the position, plus one for a UFCS receiver.
 
 How the symbol is found (src/query.ts header): per file and per compile an index, built at the first query on the file
 and dropped when the next compile starts, from a walk of the module's analysed AST and of the members of the template
@@ -1840,13 +1996,44 @@ analysis leaves no node (an enum member or a manifest constant folded to its val
 name), a read-only lookup in the symbol tables (`DsymbolTable.lookup`: the enclosing function's, the enclosing scopes',
 the module's and the modules it imports; after a `.`, the scope of the symbol before it) answers. It does not answer
 where the tables around the position hold other names: in a function body the analysis did not run (a template's own
-members, the branch a `version` or `static if` declaration did not choose, semantic3 not run), and with a runtime
-variable or parameter, which no analysis folds away (the branch a `static if` statement did not choose, a statement the
-analysis replaced by an error). Not answered either: a function of a non-root module without `-i` (semantic3 not run),
-builtin properties (`.length`), a name reached only through a chain of public imports where the lookup is needed,
-symbols inside string mixins. Cost, dgpro07 labserver.d (9991 identifiers outside keywords, 91% answered; the rest are
-mostly unanalysed version blocks and `.length`): the index 50-100 ms, a later query under 0.1 ms median (~0.5 ms through
-the djs-vscode worker).
+members, the branch a `version` or `static if` declaration did not choose, semantic3 not run, a unittest's body without
+`-unittest`, which the parser skips), and with a runtime variable or parameter, which no analysis folds away (the branch
+a `static if` statement did not choose), except in the body of a function whose analysis reported errors
+(`hasSemantic3Errors`): an expression with an error becomes an `ErrorExp` and a statement with one an `ErrorStatement`,
+which its block becomes, so the index holds none of their names, and the editor's function being typed is that case.
+There a name is looked up by position as completion's first link is (the function's locals declared before it, then the
+enclosing scopes), outside the inactive branches; a name found outside the function's locals is not answered when the
+body's text declares that name, names it as an untyped lambda parameter, or holds a `with` statement (scopes no table
+shows). The lookup takes the imports declared in the function bodies holding the name first (a renamed import's name, a
+selective one's, a plain one's module), and at a module what its imports give as dmd's `search` finds it: an imported
+module's own member, else, recursively, what its imports that are not private give (`import std.datetime;` gives
+`Clock`), the symbols not visible from the module left out; after a `.`, a module's or package's members through its
+imports and package.d. Where two imports give different symbols (ldc2 reports an ambiguity, or merges functions into an
+overload set across modules) it answers nothing: the hover has one symbol to show, and picking the first would be a
+guess. A plain import's name answers as its first package (`std` of `std.file.exists`, as the analysis resolves it), a
+renamed import's as the import. A runtime variable answers where the analysis left a node of it under another name, at
+the token or along the chain before it (`cstdio.stdout`, an alias of `__stdoutp`; a Tuple's named field `st.terminated`,
+its `__expand_field_0`). It never answers the words that are no symbol (`exit` in `scope(exit)`). A runtime variable
+before `.sizeof`, `.alignof`, `.mangleof`, `.stringof`, or inside `typeof(...)` (`is(typeof(cl.flag) : bool)`), answers
+(they keep no node of it), outside the inactive branches, and so does a member after it, through a pointer too. A
+template's parameter with no node (its declaration in the parameter list, a constraint, a `static if` condition, a
+template's argument) answers with the argument of the instance whose analysed function holds it, else of the first, the
+count of instances shown. Two names with no symbol answer the hover alone: a built-in property of the operand's type
+(completion's list: kind `property`, its type and the operand's; the operand a basic type's keyword, a string literal,
+or the identifier ending it past calls, indexes and template arguments, or a parenthesised name dereferenced,
+`(*p).length`; the definition misses with `a built-in property has no declaration`), and a parameter named in a function
+or delegate type written in a declaration (`void delegate(int code) cb;`: kind `parameter`, the definition its own
+name). Not answered either: a function of a non-root module without `-i` (semantic3 not run), a `catch` the analysis
+removed (a body that cannot throw: statementsem.d drops its `catch (Exception e)` and the handler), a parenthesised
+operand other than a name dereferenced before a built-in property (`(a + b).length`), symbols inside string mixins. A
+member of a parenthesised operand answers (`(cast(C) o).f`, `(c).f`): the analysis locates the access inside the
+parentheses, and its key is the chain after the `)`. Dgpro07 labserver.d under `-i`, every identifier token outside
+keywords, comments and literals (10093): hover 9414 and definition 9071 answered; outside the 779 tokens of inactive
+branches 9269 of 9314 hovers (99.5%); of the misses there, the words that are no symbol (`version (X)`, `scope(exit)`,
+`@nogc`), 31, the removed `catch` handlers, 13, and a pointer to an array's `.length` (`p.length`), 1; the definition
+misses where a hover answers are packages (213, no declaration) and built-in properties (130). Ops net/node.d's 2567
+tokens in unittest bodies, which the compile skipped, answer nothing (695 answered from the module's tables before).
+Cost: the index 50-100 ms, a later query under 0.1 ms median (~0.5 ms through the djs-vscode worker).
 
 The doc-comment knob, `DjsOptions.docComments` (default off): `Module.parse` hands the D parser `doDocComment` as `-D`
 does (`cast(bool) docfile`, dmodule.d:819), through `Module.djsDocComments`, which the driver sets on every call; the
@@ -1860,7 +2047,14 @@ compiles each, under load). It is part of the kept state's key (`the host option
 src/query.test.ts (hovers and definitions after `djsMainKept` and `djsMain`: a local, a parameter, a call, a method
 through `.`, a struct type, an imported function and module, a template instance's member and its count, a doc comment's
 sections, a `ditto` and an Examples block, a deprecated symbol, a stale text, a file with an error, code the analysis
-skipped, a chain of two members of one name, the knob off and flipped; the semantic tokens of each type and modifier, a
+skipped, a chain of two members of one name, the knob off and flipped, built-in properties (a type's, a value's, a
+call's, a string literal's; a `.sizeof` operand), names through a public import and a function's renamed and selective
+imports, a template's parameters with no node, a delegate type's parameters, no answer in a unittest body the parser
+skipped and the local there with `-unittest`, a plain import's name as its package, a name two imports declare (none)
+and a module's own member before its public imports', a parenthesised operand's member and variable, `(*q).length`, an
+alias to a runtime variable after a renamed import, a Tuple's named field, a parameter and its member in `typeof`, and
+the same hovers and definitions at
+every character between two kept compiles; the semantic tokens of each type and modifier, a
 member template's calls, a templated constructor and static `opCall`, a user's alias of a library class, the module in a
 qualified name, the branches not chosen, a stale text, a file outside the compile, the hover and the definition at a
 template parameter in an instance; the inlay hints of each kind and the inactive ranges of declarations, statements, the
@@ -1887,6 +2081,12 @@ copy), a function template's instances agreeing or not, locals in a body with er
 variables), an `out` parameter used after `if (c) t.x = ...` in a clean body and in one with errors, with a line
 inserted above, a qualified copy without mutable indirections, methods by their `this` qualifier, function links needing
 arguments or returning `void`, a package.d's members, an enum value's `min` and `max`, a `const` receiver's methods; the
+names in scope without a dot (locals by position and block, a `foreach`'s and an `if`'s variable within their
+statement, a nested function's and a template instance's parameters, the module's names and its imports', a public
+import's, a function-local selective import's, `this`'s members by its qualifier, a static member function's, a
+class's with its bases', a body with errors, a name typed after the compile, the misses); a
+global a string mixin declares, at its use (the hover, its name in the literal, the references) and in a `return`
+with an error; the names of an expression with an error by position, none beside a `with` or a lambda's parameter; the
 read-only contract: no `optimize` and no diagnostic during queries (`__ctfe`; hovers at every token, the peeks of an
 instance whose code holds an unanalysed manifest constant), a kept module queried after a kept compile parsed its
 importer again, and queries, tokens, hints and inactive ranges included, between two kept compiles leaving the second
@@ -1916,7 +2116,8 @@ the LDC C++ line it ports:
 - `va_listType` (`char*` | `__va_list` | `__va_list_tag*`), the ABI trio `toArgTypes`/`isReturnOnStack`/
   `preferPassByRef` (argtypes_aarch64.ts or argtypes_sysv_x64.ts, gen/abi/aarch64.cpp or gen/abi/x86-64.cpp),
   `getTargetInfo("objectFormat")`, `supportsLinkerDirective` (Mach-O only), the bit-field alignment rule;
-- `__traits(targetCPU)` / `targetHasFeature` (gen/ldctraits.ts, one feature table per arch), DMD-style `asm`
+- `__traits(targetCPU)` / `targetHasFeature` and `D_AVX`/`D_AVX2` (gen/ldctraits.ts, the feature names and CPU tables
+  of each arch, with `-mcpu=` as §4.2 says), DMD-style `asm`
   (rejected on aarch64, with LDC's error; kept unanalysed on x86_64, below), `llvmBits` of `real` for
   `LDC_intrinsic` names;
 - the C preprocessor (src/driver/cpreprocessor.ts): a cross build looks for `<mtriple>-gcc`, `<mtriple>-clang`,

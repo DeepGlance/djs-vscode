@@ -1,10 +1,10 @@
 // The messages between the extension host thread and the compiler worker (host/worker.ts).
 //
-// Plain structured-clone data, request and reply matched by `id`: the same shape would travel over a child
-// process's IPC channel, so swapping the worker for a child (ruling 3, 9/10) changes the transport, not the
-// messages. Two kinds of request: a compile, and a query (hover, definition, semantic tokens, inlay hints, inactive
-// ranges, expansion sites, expansion, AST, instances, imports, completion) on what the last compile analysed (djs 10
-// §4.7, "Queries"); the worker answers one request at a time, in arrival order.
+// Plain structured-clone data, request and reply matched by `id`: the same shape would travel over a child process's
+// IPC channel, so swapping the worker for a child (ruling 3, 9/10) changes the transport, not the messages. Two kinds
+// of request: a compile, and a query (hover, definition, semantic tokens, inlay hints, inactive ranges, expansion
+// sites, expansion, AST, instances, imports, completion, document symbols, references, rename, signature help) on what
+// the last compile analysed (djs 10 §4.7, "Queries"); the worker answers one request at a time, in arrival order.
 
 /**
  * Main thread -> worker: compile once with `args`, the full ldmd2 command line (sources included). `texts` replaces
@@ -212,9 +212,9 @@ export interface ImportsRequest {
 
 /**
  * Main thread -> worker: the members visible after `expr.` at `position` of `file` (absolute), whose editor text is
- * `text`, from the last compile (djs `queryCompletion`). Unlike the other queries, a text other than the compiled one
- * is not a miss: djs reads the expression before the dot from `text` and finds its scope at the position moved into
- * the compiled text.
+ * `text`, or the names in scope there when no dot precedes the identifier being typed, from the last compile (djs
+ * `queryCompletion`). Unlike the other queries, a text other than the compiled one is not a miss: djs reads the
+ * expression before the dot from `text` and finds its scope at the position moved into the compiled text.
  */
 export interface CompletionRequest {
     kind: "completion";
@@ -224,9 +224,55 @@ export interface CompletionRequest {
     position: Position;
 }
 
+/**
+ * Main thread -> worker: the outline of `file` (absolute), answered from the worker's last compile; `text` as in
+ * QueryRequest (another text: no outline, `stale`).
+ */
+export interface DocumentSymbolsRequest {
+    kind: "documentSymbols";
+    id: number;
+    file: string;
+    text: string;
+}
+
+/**
+ * Main thread -> worker: the references of the symbol at `line`/`character` of `file` (absolute), answered from the
+ * worker's last compile in every module it analysed; `text` as in QueryRequest (another text: none, `stale`).
+ */
+export interface ReferencesRequest extends Position {
+    kind: "references";
+    id: number;
+    file: string;
+    text: string;
+}
+
+/**
+ * Main thread -> worker: whether the symbol at `line`/`character` of `file` can be renamed (`newName` absent), or the
+ * edits renaming it to `newName`; from the worker's last compile, `text` as in QueryRequest.
+ */
+export interface RenameRequest extends Position {
+    kind: "rename";
+    id: number;
+    file: string;
+    text: string;
+    newName?: string;
+}
+
+/**
+ * Main thread -> worker: the signatures of the call whose parentheses hold `line`/`character` of `file` (absolute),
+ * from the worker's last compile; `text` as in QueryRequest (another text: none, `stale`).
+ */
+export interface SignatureHelpRequest extends Position {
+    kind: "signatureHelp";
+    id: number;
+    file: string;
+    text: string;
+}
+
 /** Main thread -> worker: any request; the worker answers one at a time, in arrival order. */
 export type Request = CompileRequest | QueryRequest | SemanticTokensRequest | InlayHintsRequest | InactiveRangesRequest
-    | ExpansionRequest | ExpansionSitesRequest | AstRequest | InstancesRequest | ImportsRequest | CompletionRequest;
+    | ExpansionRequest | ExpansionSitesRequest | AstRequest | InstancesRequest | ImportsRequest | CompletionRequest
+    | DocumentSymbolsRequest | ReferencesRequest | RenameRequest | SignatureHelpRequest;
 
 /** Worker -> main thread: the hover of a QueryRequest (djs `queryHover`). */
 export interface HoverReply {
@@ -455,33 +501,125 @@ export interface ImportsReply {
 export type CompletionKind = "method" | "function" | "field" | "property" | "variable" | "constant" | "enumMember"
     | "enum" | "struct" | "class" | "interface" | "module" | "typeParameter";
 
-/** One member visible after the dot (djs `CompletionItem`). */
+/** One name visible after the dot, or where no dot precedes the position (djs `CompletionItem`). */
 export interface CompletionItem {
-    /** The member's name as written after the dot. */
+    /** The name as written. */
     label: string;
     kind: CompletionKind;
     /** One line: the signature or type as the hover's code block prints it; "" when none. */
     detail: string;
     /** The doc comment's first line (its summary); "" when none. */
     documentation: string;
-    /** The editor's order: members of the type (0), UFCS candidates (1), built-in properties (2). */
-    group: 0 | 1 | 2;
+    /**
+     * The editor's order. After a dot: members of the type (0), UFCS candidates (1), built-in properties (2). Without
+     * one: locals and parameters (0), the enclosing aggregate's members (1), the module's names (2), the imported
+     * modules' (3).
+     */
+    group: 0 | 1 | 2 | 3;
 }
 
-/** Worker -> main thread: the members of a CompletionRequest (djs `queryCompletion`). */
+/** Worker -> main thread: the names of a CompletionRequest (djs `queryCompletion`). */
 export interface CompletionReply {
     kind: "completion";
     id: number;
     /**
-     * `range`, the text the items replace in the request's text (the identifier characters typed after the dot up to
-     * the position, empty right after the dot); `items`, sorted by group, then label, as djs gives them; `moved`, true
-     * when the request's text was not the compiled one and the scope was found through the text move. Null when there
-     * is no answer, `reason` saying why: the misses are djs's, listed in `queryCompletion`'s contract (src/query.ts).
+     * `range`, the text the items replace in the request's text (the identifier characters typed up to the position,
+     * after the dot or not; empty right after the dot or with nothing typed); `items`, sorted by group, then label, as
+     * djs gives them; `moved`, true when the request's text was not the compiled one and the scope was found through
+     * the text move. Null when there is no answer, `reason` saying why: the misses are djs's, listed in
+     * `queryCompletion`'s contract (src/query.ts).
      */
     result: { range: Range; items: CompletionItem[]; moved: boolean } | null;
     stale: boolean;
     reason: string;
     /** The query's time in the worker, in milliseconds (the index build included when the query built it). */
+    ms: number;
+}
+
+/**
+ * One declaration of an outline (djs `DocumentSymbol`): `kind` is LSP's name (`struct`, `method`, `enumMember`, ...),
+ * `detail` the signature or type, short (`(mixin) ` before a string mixin's declarations), `range` the whole
+ * declaration, `selectionRange` its name.
+ */
+export interface DocumentSymbol {
+    name: string;
+    kind: SymbolKindName;
+    detail: string;
+    range: Range;
+    selectionRange: Range;
+    children: DocumentSymbol[];
+}
+
+export type SymbolKindName = "module" | "namespace" | "class" | "struct" | "interface" | "enum" | "enumMember"
+    | "function" | "method" | "constructor" | "property" | "field" | "variable" | "constant" | "typeParameter";
+
+/** Worker -> main thread: the outline of a DocumentSymbolsRequest (djs `queryDocumentSymbols`). */
+export interface DocumentSymbolsReply {
+    kind: "documentSymbols";
+    id: number;
+    /** The declarations as a tree, each level sorted by position; null when there are none to give (`reason`). */
+    symbols: DocumentSymbol[] | null;
+    stale: boolean;
+    reason: string;
+    /** The query's time in the worker, in milliseconds (the index build included when the query built it). */
+    ms: number;
+}
+
+/** One reference (djs `ReferenceSite`): the file as the compiler names it, the identifier, whether it declares. */
+export interface ReferenceSite {
+    file: string;
+    range: Range;
+    declaration: boolean;
+}
+
+/** Worker -> main thread: the references of a ReferencesRequest (djs `queryReferences`). */
+export interface ReferencesReply {
+    kind: "references";
+    id: number;
+    /** The symbol's qualified name and its references, sorted by file and position; null when none (`reason`). */
+    result: { name: string; references: ReferenceSite[] } | null;
+    stale: boolean;
+    reason: string;
+    /** The query's time in the worker, in milliseconds (the index builds of the modules searched included). */
+    ms: number;
+}
+
+/**
+ * Worker -> main thread: a RenameRequest's answer (djs `queryPrepareRename`, `queryRename`). Without `newName`: the
+ * identifier and its text (`range`, `placeholder`), no edits; with it: the edits, each range replaced by `newName`
+ * (`range` the request's position, `placeholder` the new name). Null when the
+ * symbol cannot be renamed or the name is refused (`reason` says why, in words for the user).
+ */
+export interface RenameReply {
+    kind: "rename";
+    id: number;
+    result: { range: Range; placeholder: string; edits: { file: string; range: Range }[] } | null;
+    stale: boolean;
+    reason: string;
+    ms: number;
+}
+
+/**
+ * One candidate of a call (djs `SignatureInformation`): its label (`int grow(Shape s, int by)`), each parameter's span
+ * in it (UTF-16 offsets, end exclusive), the doc comment's summary.
+ */
+export interface SignatureInformation {
+    label: string;
+    parameters: [number, number][];
+    documentation: string;
+}
+
+/** Worker -> main thread: the signatures of a SignatureHelpRequest (djs `querySignatureHelp`). */
+export interface SignatureHelpReply {
+    kind: "signatureHelp";
+    id: number;
+    /**
+     * The candidates (the one the compile picked first), the active one and the argument the position is in (a UFCS
+     * receiver is the first); null when none (`reason`: not in a call, no function, stale).
+     */
+    result: { signatures: SignatureInformation[]; activeSignature: number; activeParameter: number } | null;
+    stale: boolean;
+    reason: string;
     ms: number;
 }
 
@@ -503,6 +641,6 @@ export interface ReadyMessage {
 /** Worker -> main thread: the reply to a `Request`, matched by `id` (`DjsCompiler.pending` resolves with it). */
 export type Reply = CompileReply | HoverReply | DefinitionReply | SemanticTokensReply | InlayHintsReply
     | InactiveRangesReply | ExpansionReply | ExpansionSitesReply | AstReply | InstancesReply | ImportsReply
-    | CompletionReply;
+    | CompletionReply | DocumentSymbolsReply | ReferencesReply | RenameReply | SignatureHelpReply;
 
 export type WorkerMessage = Reply | ReadyMessage;

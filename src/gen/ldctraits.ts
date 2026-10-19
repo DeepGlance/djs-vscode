@@ -11,18 +11,23 @@
 //   carrier of a D slice across the D/C++ boundary. With both sides ported that boundary is gone:
 //   a `DString` is the slice itself, so the struct is dropped and the two functions take and return
 //   `DString`.
-// * TARGET FOLD. Both C++ bodies query `gTargetMachine`, which no `-mcpu` and no `-mattr` (neither is in the
-//   shim's table) leaves at the triple's default CPU, so the answers depend on the triple's arch only
-//   (target.ts `Triple`, 10 §4.8):
-//   - `traitsGetTargetCPU` returns `"generic"` on aarch64 (the host and aarch64-linux-gnu) and `"x86-64"` on
-//     x86_64 (ldc2 1.43.0: `pragma(msg, __traits(targetCPU));`).
-//   - `traitsTargetHasFeature` asks LLVM's `MCSubtargetInfo` whether a feature is enabled. The LLVM
-//     data the answer depends on (LLVM 22.1.8, the one ldc2 1.43.0 is built with) is folded into two
-//     tables per arch below: every feature name the backend recognises (the "Available features" list of
-//     `ldc2 [-mtriple=<t>] -mattr=help`: 349 AArch64 names, 198 X86 names), and the ones the default CPU
-//     enables (each name probed with `__traits(targetHasFeature)` on ldc2: 8 true on aarch64, the same 8
-//     under arm64-apple-darwin and aarch64-linux-gnu; 16 true on x86_64-linux-gnu). The C++ two-step test is
-//     kept over that model; see `applyFeatureFlag` for what of LLVM's `ApplyFeatureFlag` the model keeps.
+// * THE TARGET MACHINE. Both C++ bodies query `gTargetMachine` (gen/irstate.h:44), which `cppmain` creates from the
+//   triple, the CPU and the feature string (driver/main.cpp:1229, driver/targetmachine.cpp:441). The part of it they
+//   observe is its subtarget: the CPU name and the feature bits of its `MCSubtargetInfo`. `createTargetMachine` below
+//   ports what decides those two (targetmachine.cpp's default CPU and `+cx16`, LLVM's CPU lookup and feature flags,
+//   with their stderr warnings) over tables of the LLVM data they depend on (LLVM 22.1.8, the one ldc2 1.43.0 is
+//   built with), all probed on ldc2:
+//   - every feature name each backend recognises: the "Available features" list of `ldc2 [-mtriple=<t>] -mattr=help`
+//     (349 AArch64 names, 198 X86 names);
+//   - per modelled CPU, the names `__traits(targetHasFeature)` answers true for under `ldmd2 -mcpu=<cpu>`, every
+//     name of the arch probed; on AArch64 the same under arm64-apple-darwin and aarch64-linux-gnu. LLVM builds
+//     these bits with every implied feature added, so each table is closed under implication;
+//   - the bits of a CPU name the backend does not recognise, and the closure of each feature the driver can set.
+//   A CPU name outside the tables is refused by the driver (src/djs.ts), never guessed: LLVM recognises names its
+//   `-mcpu=help` list omits (`apple-latest` on AArch64), so an unlisted name cannot be told unrecognised without a
+//   probe. Without `createTargetMachine` (a test harness) the subtarget is the triple's default.
+//   The C++ two-step test of `traitsTargetHasFeature` is kept over that model; see `applyFeatureFlag` for what of
+//   LLVM's `ApplyFeatureFlag` the model keeps.
 
 import { ErrorExp, IntegerExp, StringExp } from "../dmd/expression.js";
 import type { Expression, TraitsExp } from "../dmd/expression.js";
@@ -34,18 +39,12 @@ import { expressionSemantic, toStringExp, toUTF8 } from "../dmd/expressionsem.js
 import { isExpression } from "../dmd/dtemplate.js";
 import { ds, dsConcat, type DString } from "../dstring.js";
 import { targetTriple } from "../dmd/target.js";
+import type { Triple } from "../dmd/target.js";
+import { assert } from "../assert.js";
 
 import type { Scope } from "../dmd/dscope.js";
 
 // dropped: `extern(C++) struct Dstring` (ldctraits.d:22-26) — the C ABI slice carrier; see header.
-
-/**
- * gen/ldctraits.d:28 (declaration), gen/ldctraits.cpp:15 (body) — the target machine's CPU name.
- * Folded: `gTargetMachine->getTargetCPU()` with no `-mcpu` is the default CPU of the triple's arch.
- */
-function traitsGetTargetCPU(): DString {
-    return targetTriple().arch === "x86_64" ? ds("x86-64") : ds("generic");
-}
 
 /**
  * Every feature name the LLVM 22 AArch64 backend recognises, in LLVM's table order (byte order,
@@ -97,13 +96,89 @@ const AARCH64_FEATURES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The feature bits of the default AArch64 CPU (`generic`, LLVM 22): the names among `AARCH64_FEATURES` for
- * which ldc2 1.43.0 answers `__traits(targetHasFeature, name)` with `true`, under arm64-apple-darwin and
- * aarch64-linux-gnu alike. LLVM builds this set with every implied feature added, so it is closed under
- * implication.
+ * The feature bits of each modelled AArch64 CPU (LLVM 22), probed as the header says: `generic`, the default; the
+ * Apple silicon Macs, `apple-m2` being the one `-mcpu=native` resolves to on the probing host; the Arm cores of the
+ * Raspberry Pi 3 and Zero 2 W (cortex-a53), 4 (cortex-a72) and 5 (cortex-a76), and of the Jetson Orin (cortex-a78ae).
  */
-const DEFAULT_FEATURE_BITS: ReadonlySet<string> = new Set([
-    "enable-select-opt", "ete", "fp-armv8", "fuse-adrp-add", "fuse-aes", "neon", "trbe", "use-postra-scheduler",
+const AARCH64_CPUS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+    ["generic", new Set([
+        "enable-select-opt", "ete", "fp-armv8", "fuse-adrp-add", "fuse-aes", "neon", "trbe", "use-postra-scheduler",
+    ])],
+    ["apple-m1", new Set([
+        "CONTEXTIDREL2", "aes", "aggressive-fma", "alternate-sextload-cvt-f32-pattern", "altnzcv", "am", "apple-a14",
+        "arith-bcc-fusion", "arith-cbz-fusion", "ccdp", "ccpp", "complxnum", "crc", "disable-latency-sched-heuristic",
+        "dit", "dotprod", "el2vmsa", "el3", "flagm", "fp-armv8", "fp16fml", "fptoint", "fullfp16", "fuse-address",
+        "fuse-aes", "fuse-arith-logic", "fuse-crypto-eor", "fuse-csel", "fuse-literals", "jsconv", "lor", "lse",
+        "lse2", "max-interleave-factor-4", "mpam", "neon", "no-zcz-fpr64", "nv", "pan", "pan-rwv", "pauth", "perfmon",
+        "predres", "ras", "rcpc", "rcpc-immo", "rdm", "sb", "sel2", "sha2", "sha3", "specrestrict", "ssbs",
+        "store-pair-suppress", "tlb-rmi", "tracev8.4", "uaops", "v8.1a", "v8.2a", "v8.3a", "v8.4a", "v8a", "vh",
+        "zcm-fpr128", "zcm-gpr64", "zcz-fpr128", "zcz-gpr32", "zcz-gpr64",
+    ])],
+    ["apple-m2", new Set([
+        "CONTEXTIDREL2", "aes", "alternate-sextload-cvt-f32-pattern", "altnzcv", "am", "amvs", "apple-a15",
+        "arith-bcc-fusion", "arith-cbz-fusion", "bf16", "bti", "ccdp", "ccpp", "complxnum", "crc",
+        "disable-latency-sched-heuristic", "dit", "dotprod", "ecv", "el2vmsa", "el3", "fgt", "flagm", "fp-armv8",
+        "fp16fml", "fpac", "fptoint", "fullfp16", "fuse-address", "fuse-adrp-add", "fuse-aes", "fuse-arith-logic",
+        "fuse-crypto-eor", "fuse-csel", "fuse-literals", "i8mm", "jsconv", "lor", "lse", "lse2",
+        "max-interleave-factor-4", "mpam", "neon", "no-zcz-fpr64", "nv", "pan", "pan-rwv", "pauth", "perfmon",
+        "predres", "ras", "rcpc", "rcpc-immo", "rdm", "sb", "sel2", "sha2", "sha3", "specrestrict", "ssbs",
+        "store-pair-suppress", "tlb-rmi", "tracev8.4", "uaops", "v8.1a", "v8.2a", "v8.3a", "v8.4a", "v8.5a", "v8.6a",
+        "v8a", "vh", "zcm-fpr128", "zcm-gpr64", "zcz-fpr128", "zcz-gpr32", "zcz-gpr64",
+    ])],
+    ["apple-m3", new Set([
+        "CONTEXTIDREL2", "aes", "alternate-sextload-cvt-f32-pattern", "altnzcv", "am", "amvs", "apple-a16",
+        "arith-bcc-fusion", "arith-cbz-fusion", "bf16", "bti", "ccdp", "ccpp", "complxnum", "crc",
+        "disable-latency-sched-heuristic", "dit", "dotprod", "ecv", "el2vmsa", "el3", "fgt", "flagm", "fp-armv8",
+        "fp16fml", "fpac", "fptoint", "fullfp16", "fuse-address", "fuse-adrp-add", "fuse-aes", "fuse-arith-logic",
+        "fuse-crypto-eor", "fuse-csel", "fuse-literals", "hcx", "i8mm", "jsconv", "lor", "lse", "lse2",
+        "max-interleave-factor-4", "mpam", "neon", "no-zcz-fpr64", "nv", "pan", "pan-rwv", "pauth", "perfmon",
+        "predres", "ras", "rcpc", "rcpc-immo", "rdm", "sb", "sel2", "sha2", "sha3", "specrestrict", "ssbs",
+        "store-pair-suppress", "tlb-rmi", "tracev8.4", "uaops", "v8.1a", "v8.2a", "v8.3a", "v8.4a", "v8.5a", "v8.6a",
+        "v8a", "vh", "zcm-fpr128", "zcm-gpr64", "zcz-fpr128", "zcz-gpr32", "zcz-gpr64",
+    ])],
+    ["apple-m4", new Set([
+        "CONTEXTIDREL2", "aes", "alternate-sextload-cvt-f32-pattern", "altnzcv", "am", "amvs", "apple-m4",
+        "arith-bcc-fusion", "arith-cbz-fusion", "bf16", "bti", "ccdp", "ccpp", "complxnum", "crc",
+        "disable-latency-sched-heuristic", "dit", "dotprod", "ecv", "el2vmsa", "el3", "fgt", "flagm", "fp-armv8",
+        "fp16fml", "fpac", "fptoint", "fullfp16", "fuse-address", "fuse-adrp-add", "fuse-aes", "fuse-arith-logic",
+        "fuse-crypto-eor", "fuse-csel", "fuse-literals", "hcx", "i8mm", "jsconv", "lor", "lse", "lse2",
+        "max-interleave-factor-4", "mpam", "neon", "no-zcz-fpr64", "nv", "pan", "pan-rwv", "pauth", "perfmon",
+        "predres", "ras", "rcpc", "rcpc-immo", "rdm", "sb", "sel2", "sha2", "sha3", "sme", "sme-f64f64", "sme-i16i64",
+        "sme2", "specrestrict", "tlb-rmi", "tracev8.4", "uaops", "v8.1a", "v8.2a", "v8.3a", "v8.4a", "v8.5a", "v8.6a",
+        "v8.7a", "v8a", "vh", "wfxt", "xs", "zcm-fpr128", "zcm-gpr64", "zcz-fpr128", "zcz-gpr32", "zcz-gpr64",
+    ])],
+    ["apple-m5", new Set([
+        "CONTEXTIDREL2", "aes", "alternate-sextload-cvt-f32-pattern", "altnzcv", "am", "amvs", "apple-m5",
+        "arith-bcc-fusion", "arith-cbz-fusion", "bf16", "bti", "ccdp", "ccpp", "complxnum", "crc", "cssc",
+        "disable-latency-sched-heuristic", "dit", "dotprod", "ecv", "el2vmsa", "el3", "fgt", "flagm", "fp-armv8",
+        "fp16fml", "fpac", "fptoint", "fullfp16", "fuse-address", "fuse-adrp-add", "fuse-aes", "fuse-arith-logic",
+        "fuse-crypto-eor", "fuse-csel", "fuse-literals", "hbc", "hcx", "i8mm", "jsconv", "lor", "lse", "lse2",
+        "max-interleave-factor-4", "mpam", "mte", "neon", "no-zcz-fpr64", "nv", "pan", "pan-rwv", "pauth", "perfmon",
+        "predres", "ras", "rcpc", "rcpc-immo", "rdm", "sb", "sel2", "sha2", "sha3", "sme", "sme-b16b16", "sme-f16f16",
+        "sme-f64f64", "sme-i16i64", "sme2", "sme2p1", "specres2", "specrestrict", "sve-b16b16", "tlb-rmi", "tracev8.4",
+        "uaops", "v8.1a", "v8.2a", "v8.3a", "v8.4a", "v8.5a", "v8.6a", "v8.7a", "v8a", "vh", "wfxt", "xs",
+        "zcm-fpr128", "zcm-gpr64", "zcz-fpr128", "zcz-gpr32", "zcz-gpr64",
+    ])],
+    ["cortex-a53", new Set([
+        "a53", "aes", "balance-fp-ops", "crc", "el2vmsa", "el3", "fp-armv8", "fuse-adrp-add", "fuse-aes", "neon",
+        "perfmon", "sha2", "use-postra-scheduler", "use-wzr-to-vec-move", "v8a",
+    ])],
+    ["cortex-a72", new Set([
+        "a72", "addr-lsl-slow-14", "aes", "crc", "el2vmsa", "el3", "enable-select-opt", "fp-armv8", "fuse-adrp-add",
+        "fuse-aes", "fuse-literals", "neon", "perfmon", "predictable-select-expensive", "sha2", "v8a",
+    ])],
+    ["cortex-a76", new Set([
+        "CONTEXTIDREL2", "a76", "addr-lsl-slow-14", "aes", "alu-lsl-fast", "ccpp", "crc", "dotprod", "el2vmsa", "el3",
+        "enable-select-opt", "fp-armv8", "fullfp16", "fuse-adrp-add", "fuse-aes", "lor", "lse", "neon", "pan",
+        "pan-rwv", "perfmon", "predictable-select-expensive", "ras", "rcpc", "rdm", "sha2", "ssbs", "uaops", "v8.1a",
+        "v8.2a", "v8a", "vh",
+    ])],
+    ["cortex-a78ae", new Set([
+        "CONTEXTIDREL2", "a78ae", "addr-lsl-slow-14", "aes", "alu-lsl-fast", "ccpp", "cmp-bcc-fusion", "crc",
+        "dotprod", "el2vmsa", "el3", "enable-select-opt", "fp-armv8", "fullfp16", "fuse-adrp-add", "fuse-aes",
+        "fuse-csel", "fuse-cset", "lor", "lse", "neon", "pan", "pan-rwv", "perfmon", "predictable-select-expensive",
+        "ras", "rcpc", "rdm", "sha2", "spe", "ssbs", "uaops", "use-postra-scheduler", "v8.1a", "v8.2a", "v8a", "vh",
+    ])],
 ]);
 
 /**
@@ -141,27 +216,188 @@ const X86_FEATURES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The feature bits of the default x86_64 CPU (`x86-64`, LLVM 22) under x86_64-linux-gnu, probed as
- * `DEFAULT_FEATURE_BITS` is; closed under implication for the same reason.
+ * The feature bits of each modelled X86 CPU (LLVM 22) under x86_64-linux-gnu, probed as the header says: `x86-64`,
+ * the default, and the x86-64 psABI levels v2, v3 and v4. `x86-64` is LLVM's own bits, probed with
+ * `-mattr=-cx16`: without it the driver adds `+cx16` (`createTargetMachine`).
  */
-const X86_64_DEFAULT_FEATURE_BITS: ReadonlySet<string> = new Set([
-    "64bit", "64bit-mode", "cmov", "cx16", "cx8", "fxsr", "idivq-to-divl", "macrofusion", "mmx", "nopl",
-    "slow-3ops-lea", "slow-incdec", "sse", "sse2", "vzeroupper", "x87",
+const X86_CPUS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+    ["x86-64", new Set([
+        "64bit", "64bit-mode", "cmov", "cx8", "fxsr", "idivq-to-divl", "macrofusion", "mmx", "nopl", "slow-3ops-lea",
+        "slow-incdec", "sse", "sse2", "vzeroupper", "x87",
+    ])],
+    ["x86-64-v2", new Set([
+        "64bit", "64bit-mode", "cmov", "crc32", "cx16", "cx8", "false-deps-popcnt", "fast-15bytenop",
+        "fast-scalar-fsqrt", "fast-shld-rotate", "fxsr", "idivq-to-divl", "macrofusion", "mmx", "nopl", "popcnt",
+        "sahf", "slow-3ops-lea", "slow-unaligned-mem-32", "sse", "sse2", "sse3", "sse4.1", "sse4.2", "ssse3",
+        "vzeroupper", "x87",
+    ])],
+    ["x86-64-v3", new Set([
+        "64bit", "64bit-mode", "allow-light-256-bit", "avx", "avx2", "bmi", "bmi2", "cmov", "crc32", "cx16", "cx8",
+        "f16c", "false-deps-lzcnt-tzcnt", "false-deps-popcnt", "fast-15bytenop", "fast-scalar-fsqrt",
+        "fast-shld-rotate", "fast-variable-crosslane-shuffle", "fast-variable-perlane-shuffle", "fma", "fxsr",
+        "idivq-to-divl", "lzcnt", "macrofusion", "mmx", "movbe", "nopl", "popcnt", "sahf", "slow-3ops-lea", "sse",
+        "sse2", "sse3", "sse4.1", "sse4.2", "ssse3", "vzeroupper", "x87", "xsave",
+    ])],
+    ["x86-64-v4", new Set([
+        "64bit", "64bit-mode", "allow-light-256-bit", "avx", "avx2", "avx512bw", "avx512cd", "avx512dq", "avx512f",
+        "avx512vl", "bmi", "bmi2", "cmov", "crc32", "cx16", "cx8", "f16c", "false-deps-popcnt", "fast-15bytenop",
+        "fast-gather", "fast-scalar-fsqrt", "fast-shld-rotate", "fast-variable-crosslane-shuffle",
+        "fast-variable-perlane-shuffle", "fast-vector-fsqrt", "fma", "fxsr", "idivq-to-divl", "lzcnt", "macrofusion",
+        "mmx", "movbe", "nopl", "popcnt", "prefer-256-bit", "sahf", "slow-3ops-lea", "sse", "sse2", "sse3", "sse4.1",
+        "sse4.2", "ssse3", "vzeroupper", "x87", "xsave",
+    ])],
 ]);
+
+/**
+ * The feature bits LLVM gives a CPU name the backend does not recognise, probed with `-mcpu=<name>` (`foo`, `haswell`
+ * and the X86 names below on AArch64; `foo` and the AArch64 names below on X86): none on AArch64, three on X86.
+ */
+const AARCH64_UNRECOGNISED_CPU: ReadonlySet<string> = new Set();
+const X86_UNRECOGNISED_CPU: ReadonlySet<string> = new Set(["64bit-mode", "sse", "sse2"]);
+
+/**
+ * The implication closure of each feature the driver can set on X86 (ldmd2's `-mcpu=avx` and `-mcpu=avx2` as
+ * `-mattr=+avx[2]`, ldmd.cpp:625-628; LDC's `+cx16`, targetmachine.cpp:526), probed as the bits each adds to
+ * `X86_UNRECOGNISED_CPU` and to every table of `X86_CPUS` (`ldmd2 -mcpu=<cpu> -mcpu=avx[2]`, `ldc2 -mcpu=foo
+ * -mattr=+cx16`). `sse` and `sse2`, which LLVM's `avx` also implies, are in every X86 table here, so the probes cannot
+ * show them and the model needs neither.
+ */
+const X86_IMPLIED: ReadonlyMap<string, readonly string[]> = new Map([
+    ["avx", ["avx", "sse4.2", "sse4.1", "ssse3", "sse3"]],
+    ["avx2", ["avx2", "avx", "sse4.2", "sse4.1", "ssse3", "sse3"]],
+    ["cx16", ["cx16", "cx8"]],
+]);
+const AARCH64_IMPLIED: ReadonlyMap<string, readonly string[]> = new Map();
+
+/** One backend of the model: its feature names, its CPU tables, and what an unrecognised CPU name gets. */
+interface Backend {
+    readonly features: ReadonlySet<string>;
+    readonly cpus: ReadonlyMap<string, ReadonlySet<string>>;
+    readonly unrecognisedCpu: ReadonlySet<string>;
+    /** CPU names probed unrecognised by this backend: the other backend's modelled CPUs but `generic`. */
+    readonly notCpus: ReadonlySet<string>;
+    readonly implied: ReadonlyMap<string, readonly string[]>;
+}
+
+const AARCH64: Backend = {
+    features: AARCH64_FEATURES, cpus: AARCH64_CPUS, unrecognisedCpu: AARCH64_UNRECOGNISED_CPU,
+    notCpus: new Set([...X86_CPUS.keys()]), implied: AARCH64_IMPLIED,
+};
+const X86: Backend = {
+    features: X86_FEATURES, cpus: X86_CPUS, unrecognisedCpu: X86_UNRECOGNISED_CPU,
+    notCpus: new Set([...AARCH64_CPUS.keys()].filter((c) => c !== "generic")), implied: X86_IMPLIED,
+};
+
+function backendOf(triple: Triple): Backend {
+    return triple.arch === "x86_64" ? X86 : AARCH64;
+}
+
+/** targetmachine.cpp:269 `getTargetCPU` over the modelled triples (:190 `getX86TargetCPU`, :248). */
+function getTargetCPU(triple: Triple): string {
+    return triple.arch === "x86_64" ? "x86-64" : "generic";
+}
+
+/**
+ * Whether the model covers `-mcpu=<cpu>` on `triple` (`cpu` is `codegen::getCPUStr()`, `native` already resolved):
+ * the empty string and `generic` (the triple's default CPU), a CPU of the backend's table, or a name probed
+ * unrecognised by it. The driver refuses any other name.
+ */
+export function isModelledCPU(triple: Triple, cpu: string): boolean {
+    const b = backendOf(triple);
+    return cpu === "" || cpu === "generic" || b.cpus.has(cpu) || b.notCpus.has(cpu);
+}
+
+/** The subtarget of a target machine: its CPU name and its feature bits, as names, closed under implication. */
+interface Subtarget {
+    readonly cpu: string;
+    readonly bits: ReadonlySet<string>;
+}
+
+/** gen/irstate.h:44 `gTargetMachine`, the part the traits read; null until a driver calls `createTargetMachine`. */
+let gTargetMachine: Subtarget | null = null;
+
+/**
+ * The subtarget the traits query: the driver's, or without one (a test harness) the triple's default, which prints
+ * no warning.
+ */
+function subtarget(): Subtarget {
+    return gTargetMachine ?? buildSubtarget(targetTriple(), "", []);
+}
+
+/**
+ * driver/targetmachine.cpp:441 `createTargetMachine`, the part that decides the subtarget the frontend observes, with
+ * the `MCSubtargetInfo` LLVM's `createTargetMachine` builds from it (llvm/lib/MC/MCSubtargetInfo.cpp `getFeatures`).
+ * `cpu` is `opts::getCPUStr()` and `features` the flags of `opts::getFeaturesStr()` (`+<name>`), in order; the
+ * triple is `targetTriple()`. Sets the subtarget every later trait reads, until the next call.
+ *
+ * Precondition: `isModelledCPU(targetTriple(), cpu)`, which the driver checks while parsing the command line, and
+ * every flag a `+` one whose name the backend either does not recognise or has a closure in its `implied` table (the
+ * driver sets only `+avx` and `+avx2`).
+ * Prints LLVM's warnings to stderr as ldc2 does, before the frontend runs: for a CPU name the backend does not
+ * recognise, `'<cpu>' is not a recognized processor for this target (ignoring processor)`, then one
+ * `'<flag>' is not a recognized feature for this target (ignoring feature)` per unrecognised feature in order, then
+ * the CPU line again (ldc2 1.43.0: `ldmd2 -mcpu=foo -mcpu=avx -mcpu=avx2` on arm64-apple-darwin).
+ */
+export function createTargetMachine(cpu: string, features: readonly string[]): void {
+    gTargetMachine = buildSubtarget(targetTriple(), cpu, features);
+}
+
+/** `createTargetMachine`'s body for `triple`: returns the subtarget instead of setting it. */
+function buildSubtarget(triple: Triple, cpu: string, features: readonly string[]): Subtarget {
+    const backend = backendOf(triple);
+    assert(isModelledCPU(triple, cpu), `createTargetMachine: -mcpu=${cpu} is outside the model`);
+
+    // With an empty CPU string, LLVM will default to the host CPU, which is
+    // usually not what we want (expected behavior from other compilers is
+    // to default to "generic").
+    if (cpu === "" || cpu === "generic") {
+        cpu = getTargetCPU(triple);   // never empty on the modelled triples
+    }
+
+    // Package up features to be passed to target/subtarget.
+    // `getDefaultSubtargetFeatures(triple)` (:509) adds none for the modelled triples: no probe shows one.
+    const flags = [...features];
+
+    // cmpxchg16b is not available on old 64bit CPUs. Enable code generation
+    // if the user did not make an explicit choice.
+    // (the arch is not checked: `-mcpu=x86-64` on AArch64 warns about `+cx16`, probed)
+    if (cpu === "x86-64" && !flags.some((f) => f.slice(1) === "cx16")) {
+        flags.push("+cx16");
+    }
+    // :530-545 RISC-V and LoongArch; :556-593 relocation model and float ABI: nothing the frontend reads here.
+
+    // MCSubtargetInfo.cpp `getFeatures`: the CPU's implied bits, or a warning; the feature flags in order. An
+    // unrecognised CPU is warned about once more after the flags (probed; the C++ is not in this tree).
+    const recognised = backend.cpus.has(cpu);
+    const cpuWarning = dsConcat(ds("'"), ds(cpu), ds("' is not a recognized processor for this target"),
+        ds(" (ignoring processor)\n"));
+    if (!recognised)
+        process.stderr.write(cpuWarning);
+    let bits: ReadonlySet<string> = recognised ? backend.cpus.get(cpu)! : backend.unrecognisedCpu;
+    for (const f of flags) {
+        assert(f[0] === "+" && (!backend.features.has(f.slice(1)) || backend.implied.has(f.slice(1))),
+            `createTargetMachine: ${f} has no closure in the model`);
+        bits = applyFeatureFlag(backend, bits, ds(f));
+    }
+    if (!recognised)
+        process.stderr.write(cpuWarning);
+    return { cpu, bits };
+}
 
 /**
  * `MCSubtargetInfo::ApplyFeatureFlag` (llvm/lib/MC/MCSubtargetInfo.cpp) over the folded model:
  * returns the feature bits after applying `flag` (`+name` or `-name`) to `bits`, which it does not
- * modify, against the backend's table of names `features`. An unrecognised name leaves the bits
+ * modify, against `backend`'s table of names. An unrecognised name leaves the bits
  * unchanged and prints LLVM's warning to stderr, as ldc2 does
  * (`'-sse2' is not a recognized feature for this target (ignoring feature)`).
  *
  * LLVM also sets (on `+`) the features the named one implies and clears (on `-`) the features that
- * imply it. The model has no implication graph and needs none for the only question asked of it:
+ * imply it. The model sets the closure of the features in `backend.implied` (the ones the driver sets) and
+ * the name alone for any other, and clears the name alone. That is enough for the trait's question:
  * `bits` is implication-closed, so `+name` leaves it unchanged exactly when `name` is in it, and
  * `-name` changes it exactly when `name` is in it — the answers the full graph gives.
  */
-function applyFeatureFlag(features: ReadonlySet<string>, bits: ReadonlySet<string>, flag: DString): Set<string> {
+function applyFeatureFlag(backend: Backend, bits: ReadonlySet<string>, flag: DString): Set<string> {
     const result = new Set(bits);
     const feature = flag.subarray(1); // `SubtargetFeatures::StripFlag`: the caller always prefixes a flag
     // WHY bytes, not `dsToJs`: LLVM's `Find` compares the StringRef's bytes. One char code per byte
@@ -170,7 +406,7 @@ function applyFeatureFlag(features: ReadonlySet<string>, bits: ReadonlySet<strin
     let name = "";
     for (let i = 0; i < feature.length; i++)
         name += String.fromCharCode(feature[i]);
-    if (!features.has(name)) {
+    if (!backend.features.has(name)) {
         // `errs() << "'" << Feature << "' is not a recognized feature for this target" << " (ignoring feature)\n"`.
         // raw_ostream writes the StringRef whole, so the bytes go out as they are: no printf `%.*s`
         // (it stops at an embedded NUL) and no UTF-8 decode (10 §4.4's `dsToJs` drops a BOM and turns
@@ -179,10 +415,12 @@ function applyFeatureFlag(features: ReadonlySet<string>, bits: ReadonlySet<strin
         process.stderr.write(dsConcat(ds("'"), flag, tail));
         return result;
     }
-    if (flag[0] === 0x2B) // '+'
-        result.add(name);
-    else
+    if (flag[0] === 0x2B) { // '+'
+        for (const f of backend.implied.get(name) ?? [name])
+            result.add(f);
+    } else {
         result.delete(name);
+    }
     return result;
 }
 
@@ -196,11 +434,19 @@ function featureBitsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boole
 }
 
 /**
+ * gen/ldctraits.d:28 (declaration), gen/ldctraits.cpp:15 (body) — the target machine's CPU name: the `-mcpu` one
+ * as given (`native` resolved), an unrecognised one included, or the triple's default (`createTargetMachine`).
+ */
+function traitsGetTargetCPU(): DString {
+    return ds(subtarget().cpu);
+}
+
+/**
  * gen/ldctraits.d:29 (declaration), gen/ldctraits.cpp:20 (body) — whether the target machine has
  * `feature` enabled (together with every feature it implies). Unknown names answer false, after
- * LLVM's stderr warning.
+ * LLVM's stderr warning. Also called by the driver for `D_AVX`/`D_AVX2` (driver/main.cpp:805-808).
  */
-function traitsTargetHasFeature(feature: DString): boolean {
+export function traitsTargetHasFeature(feature: DString): boolean {
     const feat = feature;
 
     // This is a work-around to a missing interface in LLVM to query whether a
@@ -208,15 +454,14 @@ function traitsTargetHasFeature(feature: DString): boolean {
 
     // Copy MCSubtargetInfo so we can modify it.
     // resolved: `#if LLVM_VERSION_MAJOR >= 23` (ldctraits.cpp:27) -> false (LLVM 22.1.8): the copy is of
-    // `*gTargetMachine->getMCSubtargetInfo()`, whose feature bits are the folded default set.
-    const isX86_64 = targetTriple().arch === "x86_64";
-    const features = isX86_64 ? X86_FEATURES : AARCH64_FEATURES;   // the backend's feature table
-    const savedFeatbits = isX86_64 ? X86_64_DEFAULT_FEATURE_BITS : DEFAULT_FEATURE_BITS;
+    // `*gTargetMachine->getMCSubtargetInfo()`, whose feature bits are the subtarget's.
+    const backend = backendOf(targetTriple());
+    const savedFeatbits = subtarget().bits;
 
     // Nothing will change if the feature string is not recognized or if the
     // feature is disabled.
     {
-        const newFeatbits = applyFeatureFlag(features, savedFeatbits, dsConcat(ds("-"), feat));
+        const newFeatbits = applyFeatureFlag(backend, savedFeatbits, dsConcat(ds("-"), feat));
         if (featureBitsEqual(savedFeatbits, newFeatbits)) {
             return false;
         }
@@ -225,7 +470,7 @@ function traitsTargetHasFeature(feature: DString): boolean {
     {
         // Now that unrecognized feature strings are excluded,
         // nothing will change iff the feature and its implied features are enabled.
-        const newFeatbits = applyFeatureFlag(features, savedFeatbits, dsConcat(ds("+"), feat));
+        const newFeatbits = applyFeatureFlag(backend, savedFeatbits, dsConcat(ds("+"), feat));
         return featureBitsEqual(savedFeatbits, newFeatbits);
     }
 }

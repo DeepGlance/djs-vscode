@@ -17,7 +17,7 @@
 // `-w -de -preview=dip1000 -preview=dtorfields -preview=fieldwise -version=CoreUnittest -version=StdUnittest
 // -checkaction=context`): without StdUnittest, Phobos compiles almost none of its unittests. Every
 // `.d` and `.di` file is a module and is measured (the ldc/*.di modules are the compiler's intrinsics, imported
-// as modules by core and std); the one C header, importc.h, is SKIP-IMPORTC: ImportC is excluded from the port.
+// as modules by core and std), and so is the one C header, importc.h, through ImportC (`cc` preprocesses it).
 // ldc/opencl.di (and any module in a directory ldc/dcompute*/) is SKIP-DCOMPUTE: a `@compute` module needs LDC's
 // DCompute semantic (gen/semantic.d:20, dcomputeSemanticAnalysis in C++), which the port does not carry.
 // Under `--unittest`, the modules of NO_VCG_UNITTEST are compiled without `-vcg-ast`: ldc2 itself never finishes
@@ -39,7 +39,7 @@
 // against the first line of the file that exists. The comparison is skipped, and recorded as such, only when
 // neither compiler wrote a `.cg` (an error stopped both before main.d:857). The `.cg` texts are normalized for
 // paths only (the copy's root and the install's), not by the diagnostic normalizer. A record's `dir` is the
-// module's top-level directory (`core`, `std`, ...; `(root)` for object.d and __importc_builtins.di).
+// module's top-level directory (`core`, `std`, ...; `(root)` for object.d, __importc_builtins.di and importc.h).
 //
 // TIMING. `wallS` is time's `real` (10 ms resolution), `rssBytes` its `maximum resident set size` (for ldmd2,
 // the maximum over ldmd2 and the ldc2 it spawns: the kernel folds a waited-for child's usage into its parent).
@@ -324,17 +324,15 @@ function enumerate(root: string): string[] {
 const DCOMPUTE_NOTE = "a @compute module: LDC's DCompute semantic (gen/semantic.d:20, C++) is not ported";
 
 /**
- * The skip class of a file that is not measured, or null for a module that is (`.d`, `.di`): a C source is
- * SKIP-IMPORTC; a DCompute module (ldc/opencl.di, or a module under a directory whose name starts with
- * `ldc/dcompute`) is SKIP-DCOMPUTE. ldc/dcompute.d itself is no `@compute` module and stays measured.
+ * The skip class of a file that is not measured, or null for a module that is (`.d`, `.di`, and a C source,
+ * `.h`, `.c` or `.i`, through ImportC): a DCompute module (ldc/opencl.di, or a module under a directory whose name
+ * starts with `ldc/dcompute`) is SKIP-DCOMPUTE. ldc/dcompute.d itself is no `@compute` module and stays measured.
  */
 export function skipOf(rel: string): { status: string; detail: string } | null {
     if (rel === "ldc/opencl.di" || /^ldc\/dcompute[^/]*\//.test(rel))
         return { status: "SKIP-DCOMPUTE", detail: DCOMPUTE_NOTE };
-    if (rel.endsWith(".d") || rel.endsWith(".di"))
+    if (/\.(d|di|h|c|i)$/.test(rel))
         return null;
-    if (rel.endsWith(".h") || rel.endsWith(".c") || rel.endsWith(".i"))
-        return { status: "SKIP-IMPORTC", detail: "a C source: ImportC (dmd.cparse) is excluded from the port" };
     return { status: "SKIP-OTHER", detail: "not a D or C source" };
 }
 

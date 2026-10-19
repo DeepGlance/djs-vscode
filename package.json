@@ -33,6 +33,16 @@
   "activationEvents": [
     "onLanguage:d"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode djs compiles with the default line and the bundled import tree: the workspace's djs.ldc2Line and djs.ldcRoot, which name a command line and a path, are ignored until the folder is trusted.",
+      "restrictedConfigurations": [
+        "djs.ldc2Line",
+        "djs.ldcRoot"
+      ]
+    }
+  },
   "contributes": {
     "languages": [
       {
@@ -227,7 +237,6 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "~1.140.0",
-    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.25.12",
     "typescript": "^5.7.0",

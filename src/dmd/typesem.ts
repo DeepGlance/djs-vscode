@@ -45,7 +45,7 @@ import { assert, assertUnreachable, SwitchError } from "../assert.js";
 import { cstr, ds, dsEquals, dsSlice, dsToJs } from "../dstring.js";
 import type { DString } from "../dstring.js";
 import { maskUnsignedN, SIZE_MAX, toInt64 } from "../numeric.js";
-import { K, keepMergedAA, keepMergeFound, keepType } from "../keep.js";
+import { K, keepErrorState, keepMergedAA, keepMergeFound, keepType } from "../keep.js";
 import { checkAccess, checkAccessPackage, mostVisibleOverload, symbolIsVisible } from "./access.js";
 import { ClassKind } from "./aggregate.js";
 import type { AggregateDeclaration } from "./aggregate.js";
@@ -4517,6 +4517,8 @@ export function typeSemantic(type: Type, loc: Loc, sc: Scope | null): Type {
         if (t.value === null) {
             if (global.errors === 0)
                 error(mtype.loc, ds("`%s` does not give a valid type"), mtype.toChars());
+            else if (K.on)
+                keepErrorState(null);   // the kept-module engine: not reported, after an error
             return errorType();
         }
         return t.value;

@@ -147,6 +147,14 @@ export class CompileEnv {
     }
 }
 
+/// What `scan` does after a case body moved to a helper: return (a token was set), continue the scan
+/// loop, or `goto case_ident`.
+const enum Scan {
+    return_,
+    continue_,
+    ident,
+}
+
 /***********************************************************
  * The lexical analyzer (lexer.d:63, `class Lexer`).
  *
@@ -436,7 +444,9 @@ export class Lexer {
             let startsUCN = false;
             t.ptr = this.buf.subarray(this.p); // t.ptr = p
             t.loc = this.loc();
-            switch (this.byteAt(this.p)) {
+            // `goto case_ident;` (lexer.d:435-572) is `break case_ident;`: every case that does not
+            // return or continue breaks out to the one identifier tail below the switch.
+            case_ident: switch (this.byteAt(this.p)) {
                 case 0:
                 case 0x1a:
                     t.value = TOK.endOfFile; // end of file
@@ -493,21 +503,11 @@ export class Lexer {
                         } else if (this.byteAt(this.p + 1) === 0x75 /* 'u' */) {
                             // Universal Character Name (C) 2 byte: \uXXXX
                             startsUCN = true;
-                            if (!this.scanIdentifier(t, startsUCN)) {
-                                if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                                return;
-                            }
-                            this.finishIdentifier(t);
-                            return;
+                            break case_ident;
                         } else if (this.byteAt(this.p + 1) === 0x55 /* 'U' */) {
                             // Universal Character Name (C) 4 byte: \UXXXXXXXX
                             startsUCN = true;
-                            if (!this.scanIdentifier(t, startsUCN)) {
-                                if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                                return;
-                            }
-                            this.finishIdentifier(t);
-                            return;
+                            break case_ident;
                         }
                     }
                     // goto default;
@@ -515,16 +515,6 @@ export class Lexer {
                     return;
 
                 case 0x30 /* '0' */:
-                    if (!isZeroSecond(this.byteAt(this.p + 1))) {
-                        // if numeric literal does not continue
-                        ++this.p;
-                        t.unsvalue = 0n;
-                        t.value = TOK.int32Literal;
-                        return;
-                    }
-                    t.value = this.number(t); // goto Lnumber
-                    return;
-
                 case 0x31 /* '1' */:
                 case 0x32:
                 case 0x33:
@@ -534,170 +524,25 @@ export class Lexer {
                 case 0x37:
                 case 0x38:
                 case 0x39 /* '9' */:
-                    if (!isDigitSecond(this.byteAt(this.p + 1))) {
-                        // if numeric literal does not continue
-                        t.unsvalue = BigInt(this.byteAt(this.p) - 0x30); // *p - '0'
-                        ++this.p;
-                        t.value = TOK.int32Literal;
-                        return;
-                    }
-                    t.value = this.number(t); // Lnumber
-                    return;
-
                 case 0x27 /* '\'' */:
-                    if (issinglechar(this.byteAt(this.p + 1)) && this.byteAt(this.p + 2) === 0x27) {
-                        t.unsvalue = BigInt(this.byteAt(this.p + 1)); // simple one character literal
-                        t.value = TOK.charLiteral;
-                        this.p += 3;
-                    } else if (this.Ccompile) {
-                        this.clexerCharConstant(t, 0);
-                    } else {
-                        t.value = this.charConstant(t);
-                    }
-                    return;
-
                 case 0x75 /* 'u' */:
                 case 0x55 /* 'U' */:
-                case 0x4c /* 'L' */: {
-                    if (!this.Ccompile) {
-                        if (!this.scanIdentifier(t, startsUCN)) {
-                            if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                            return;
-                        }
-                        this.finishIdentifier(t);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x27 /* '\'' */) {
-                        // C wide character constant
-                        let c = this.byteAt(this.p);
-                        if (c === 0x4c /* 'L' */) {
-                            // convert L to u or U
-                            c = this.wchar_tsize === 4 ? 0x75 /* 'u' */ : 0x55 /* 'U' */;
-                        }
-                        ++this.p;
-                        this.clexerCharConstant(t, c);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
-                        // C wide string literal
-                        const c = this.byteAt(this.p);
-                        ++this.p;
-                        this.escapeStringConstant(t);
-                        t.postfix =
-                            c === 0x4c /* 'L' */
-                                ? this.wchar_tsize === 2
-                                    ? 0x77 /* 'w' */
-                                    : 0x64 /* 'd' */
-                                : c === 0x75 /* 'u' */
-                                  ? 0x77 /* 'w' */
-                                  : 0x64 /* 'd' */;
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x38 /* '8' */ && this.byteAt(this.p + 2) === 0x22 /* '"' */) {
-                        // C UTF-8 string literal
-                        this.p += 2;
-                        this.escapeStringConstant(t);
-                        return;
-                    }
-                    if (!this.scanIdentifier(t, startsUCN)) {
-                        if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                        return;
-                    }
-                    this.finishIdentifier(t);
-                    return;
-                }
-
+                case 0x4c /* 'L' */:
                 case 0x72 /* 'r' */:
-                    if (this.Ccompile || this.byteAt(this.p + 1) !== 0x22 /* '"' */) {
-                        if (!this.scanIdentifier(t, startsUCN)) {
-                            if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                            return;
-                        }
-                        this.finishIdentifier(t);
-                        return;
-                    }
-                    this.p++;
-                    // goto case '`';
-                    this.wysiwygStringConstant(t);
-                    return;
                 case 0x60 /* '`' */:
-                    if (this.Ccompile) {
-                        if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                        return;
-                    }
-                    this.wysiwygStringConstant(t);
-                    return;
                 case 0x78 /* 'x' */:
-                    if (this.byteAt(this.p + 1) !== 0x22 /* '"' */) {
-                        if (!this.scanIdentifier(t, startsUCN)) {
-                            if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                            return;
-                        }
-                        this.finishIdentifier(t);
-                        return;
-                    }
-                    this.p++;
-                    t.value = this.hexStringConstant(t);
-                    return;
                 case 0x71 /* 'q' */:
-                    if (this.Ccompile) {
-                        if (!this.scanIdentifier(t, startsUCN)) {
-                            if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                            return;
-                        }
-                        this.finishIdentifier(t);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
-                        this.p++;
-                        this.delimitedStringConstant(t);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x7b /* '{' */) {
-                        this.p++;
-                        this.tokenStringConstant(t);
-                        return;
-                    }
-                    if (!this.scanIdentifier(t, startsUCN)) {
-                        if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                        return;
-                    }
-                    this.finishIdentifier(t);
-                    return;
                 case 0x69 /* 'i' */:
-                    if (this.Ccompile) {
-                        if (!this.scanIdentifier(t, startsUCN)) {
-                            if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                            return;
-                        }
-                        this.finishIdentifier(t);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
-                        this.p++; // skip the i
-                        this.escapeStringConstant(t, true);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x60 /* '`' */) {
-                        this.p++; // skip the i
-                        this.wysiwygStringConstant(t, true);
-                        return;
-                    }
-                    if (this.byteAt(this.p + 1) === 0x71 /* 'q' */ && this.byteAt(this.p + 2) === 0x7b /* '{' */) {
-                        this.p += 2; // skip the i and q
-                        this.tokenStringConstant(t, true);
-                        return;
-                    }
-                    if (!this.scanIdentifier(t, startsUCN)) {
-                        if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                        return;
-                    }
-                    this.finishIdentifier(t);
-                    return;
                 case 0x22 /* '"' */:
-                    this.escapeStringConstant(t);
-                    return;
-
+                    switch (this.scanLiteral(t)) {
+                        case Scan.return_:
+                            return;
+                        case Scan.continue_:
+                            continue;
+                        case Scan.ident:
+                            break case_ident;
+                    }
+                    break case_ident;
                 // case 'a'..'z' / 'A'..'Z' / '_' — identifier start (the long `case_ident` block).
                 // (The few letters that have their own case above — u U L r x q i — fall through to
                 // their handlers; the remaining letters land here.)
@@ -709,12 +554,7 @@ export class Lexer {
                 case 0x51: case 0x52: case 0x53: case 0x54: /* U */ case 0x56: case 0x57: case 0x58:
                 case 0x59: case 0x5a:
                 case 0x5f /* '_' */: {
-                    if (!this.scanIdentifier(t, startsUCN)) {
-                        if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
-                        return;
-                    }
-                    this.finishIdentifier(t);
-                    return;
+                    break case_ident;
                 }
 
                 case 0x2f /* '/' */: {
@@ -726,251 +566,31 @@ export class Lexer {
                     continue;
                 }
                 case 0x2e /* '.' */:
-                    this.p++;
-                    if (isdigit(this.byteAt(this.p))) {
-                        // Note that we don't allow ._1 and ._ as valid floating point numbers.
-                        this.p--;
-                        t.value = this.inreal(t);
-                    } else if (this.byteAt(this.p) === 0x2e /* '.' */) {
-                        if (this.byteAt(this.p + 1) === 0x2e) {
-                            this.p += 2;
-                            t.value = TOK.dotDotDot;
-                        } else {
-                            this.p++;
-                            t.value = TOK.slice;
-                        }
-                    } else {
-                        t.value = TOK.dot;
-                    }
-                    return;
                 case 0x26 /* '&' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.andAssign;
-                    } else if (this.byteAt(this.p) === 0x26 /* '&' */) {
-                        this.p++;
-                        t.value = TOK.andAnd;
-                    } else {
-                        t.value = TOK.and;
-                    }
-                    return;
                 case 0x7c /* '|' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d) {
-                        this.p++;
-                        t.value = TOK.orAssign;
-                    } else if (this.byteAt(this.p) === 0x7c /* '|' */) {
-                        this.p++;
-                        t.value = TOK.orOr;
-                    } else {
-                        t.value = TOK.or;
-                    }
-                    return;
                 case 0x2d /* '-' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d) {
-                        this.p++;
-                        t.value = TOK.minAssign;
-                    } else if (this.byteAt(this.p) === 0x2d /* '-' */) {
-                        this.p++;
-                        t.value = TOK.minusMinus;
-                    } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
-                        ++this.p;
-                        t.value = TOK.arrow;
-                    } else {
-                        t.value = TOK.min;
-                    }
-                    return;
                 case 0x2b /* '+' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d) {
-                        this.p++;
-                        t.value = TOK.addAssign;
-                    } else if (this.byteAt(this.p) === 0x2b /* '+' */) {
-                        this.p++;
-                        t.value = TOK.plusPlus;
-                    } else {
-                        t.value = TOK.add;
-                    }
-                    return;
                 case 0x3c /* '<' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.lessOrEqual; // <=
-                    } else if (this.byteAt(this.p) === 0x3c /* '<' */) {
-                        this.p++;
-                        if (this.byteAt(this.p) === 0x3d) {
-                            this.p++;
-                            t.value = TOK.leftShiftAssign; // <<=
-                        } else {
-                            t.value = TOK.leftShift; // <<
-                        }
-                    } else if (this.byteAt(this.p) === 0x3a /* ':' */ && this.Ccompile) {
-                        ++this.p;
-                        t.value = TOK.leftBracket; // <:
-                    } else if (this.byteAt(this.p) === 0x25 /* '%' */ && this.Ccompile) {
-                        ++this.p;
-                        t.value = TOK.leftCurly; // <%
-                    } else {
-                        t.value = TOK.lessThan; // <
-                    }
-                    return;
                 case 0x3e /* '>' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.greaterOrEqual; // >=
-                    } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
-                        this.p++;
-                        if (this.byteAt(this.p) === 0x3d) {
-                            this.p++;
-                            t.value = TOK.rightShiftAssign; // >>=
-                        } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
-                            this.p++;
-                            if (this.byteAt(this.p) === 0x3d) {
-                                this.p++;
-                                t.value = TOK.unsignedRightShiftAssign; // >>>=
-                            } else {
-                                t.value = TOK.unsignedRightShift; // >>>
-                            }
-                        } else {
-                            t.value = TOK.rightShift; // >>
-                        }
-                    } else {
-                        t.value = TOK.greaterThan; // >
-                    }
-                    return;
                 case 0x21 /* '!' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.notEqual; // !=
-                    } else {
-                        t.value = TOK.not; // !
-                    }
-                    return;
                 case 0x3d /* '=' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.equal; // ==
-                    } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
-                        this.p++;
-                        t.value = TOK.goesTo; // =>
-                    } else {
-                        t.value = TOK.assign; // =
-                    }
-                    return;
                 case 0x7e /* '~' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.concatenateAssign; // ~=
-                    } else {
-                        t.value = TOK.tilde; // ~
-                    }
-                    return;
                 case 0x5e /* '^' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x5e /* '^' */) {
-                        this.p++;
-                        if (this.byteAt(this.p) === 0x3d) {
-                            this.p++;
-                            t.value = TOK.powAssign; // ^^=
-                        } else {
-                            t.value = TOK.pow; // ^^
-                        }
-                    } else if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.xorAssign; // ^=
-                    } else {
-                        t.value = TOK.xor; // ^
-                    }
-                    return;
                 case 0x28 /* '(' */:
-                    this.p++;
-                    t.value = TOK.leftParenthesis;
-                    return;
                 case 0x29 /* ')' */:
-                    this.p++;
-                    t.value = TOK.rightParenthesis;
-                    return;
                 case 0x5b /* '[' */:
-                    this.p++;
-                    t.value = TOK.leftBracket;
-                    return;
                 case 0x5d /* ']' */:
-                    this.p++;
-                    t.value = TOK.rightBracket;
-                    return;
                 case 0x7b /* '{' */:
-                    this.p++;
-                    t.value = TOK.leftCurly;
-                    return;
                 case 0x7d /* '}' */:
-                    this.p++;
-                    t.value = TOK.rightCurly;
-                    return;
                 case 0x3f /* '?' */:
-                    this.p++;
-                    t.value = TOK.question;
-                    return;
                 case 0x2c /* ',' */:
-                    this.p++;
-                    t.value = TOK.comma;
-                    return;
                 case 0x3b /* ';' */:
-                    this.p++;
-                    t.value = TOK.semicolon;
-                    return;
                 case 0x3a /* ':' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3a /* ':' */) {
-                        ++this.p;
-                        t.value = TOK.colonColon;
-                    } else if (this.byteAt(this.p) === 0x3e /* '>' */ && this.Ccompile) {
-                        ++this.p;
-                        t.value = TOK.rightBracket;
-                    } else {
-                        t.value = TOK.colon;
-                    }
-                    return;
                 case 0x24 /* '$' */:
-                    this.p++;
-                    t.value = TOK.dollar;
-                    return;
                 case 0x40 /* '@' */:
-                    this.p++;
-                    t.value = TOK.at;
-                    return;
                 case 0x2a /* '*' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.mulAssign;
-                    } else {
-                        t.value = TOK.mul;
-                    }
-                    return;
                 case 0x25 /* '%' */:
-                    this.p++;
-                    if (this.byteAt(this.p) === 0x3d /* '=' */) {
-                        this.p++;
-                        t.value = TOK.modAssign;
-                    } else if (this.byteAt(this.p) === 0x3e /* '>' */ && this.Ccompile) {
-                        ++this.p;
-                        t.value = TOK.rightCurly;
-                    } else if (this.byteAt(this.p) === 0x3a /* ':' */ && this.Ccompile) {
-                        // goto case '#';  // %: means #
-                        if (this.scanPound(t)) {
-                            continue;
-                        }
-                        return;
-                    } else {
-                        t.value = TOK.mod;
-                    }
+                    if (this.scanOperator(t)) continue; // only `%:` (ImportC) continues, via scanPound
                     return;
                 case 0x23 /* '#' */: {
                     if (this.scanPound(t)) {
@@ -985,6 +605,433 @@ export class Lexer {
                     return;
                 }
             }
+            // case_ident: (lexer.d:628). One copy, as in D: a copy per `goto` was one more call site
+            // that could first run after scan() was compiled, deoptimizing it (see scanLiteral).
+            if (!this.scanIdentifier(t, startsUCN)) {
+                if (this.scanDefault(t)) continue; // goto default: its `continue` resumes the scan loop
+                return;
+            }
+            this.finishIdentifier(t);
+            return;
+        }
+    }
+
+    /**
+     * The literal cases of `scan` (lexer.d:448-575: `case '0'` .. `case '9'`, `'\''`, `'u'`, `'U'`,
+     * `'L'`, `'r'`, `` '`' ``, `'x'`, `'q'`, `'i'`, `'"'`), bodies unchanged except that each exit says
+     * what scan does next: `Scan.return_` (a token was set), `Scan.continue_` (the scan loop goes on,
+     * via `goto default`), `Scan.ident` (`goto case_ident`). The letters lex an identifier unless a
+     * string or character literal prefix follows them.
+     *
+     * WHY scanLiteral and scanOperator are methods and not cases of scan (D has them inline): V8
+     * deoptimizes a compiled function the first time it reaches a property access or call that had
+     * not run before it was compiled, and compiles it again once it is hot. The rare literal forms and
+     * operators (`q{`, `x"`, `^^=`, `>>>=`, ...) were such sites inside scan(), whose TurboFan
+     * compile is the largest of the frontend: one process recompiled it 11-21 times, about a tenth of
+     * the instructions of a small module's compile. Now a first use recompiles only a helper.
+     */
+    private scanLiteral(t: Token): Scan {
+        switch (this.byteAt(this.p)) {
+            case 0x30 /* '0' */:
+                if (!isZeroSecond(this.byteAt(this.p + 1))) {
+                    // if numeric literal does not continue
+                    ++this.p;
+                    t.unsvalue = 0n;
+                    t.value = TOK.int32Literal;
+                    return Scan.return_;
+                }
+                t.value = this.number(t); // goto Lnumber
+                return Scan.return_;
+
+            case 0x31 /* '1' */:
+            case 0x32:
+            case 0x33:
+            case 0x34:
+            case 0x35:
+            case 0x36:
+            case 0x37:
+            case 0x38:
+            case 0x39 /* '9' */:
+                if (!isDigitSecond(this.byteAt(this.p + 1))) {
+                    // if numeric literal does not continue
+                    t.unsvalue = BigInt(this.byteAt(this.p) - 0x30); // *p - '0'
+                    ++this.p;
+                    t.value = TOK.int32Literal;
+                    return Scan.return_;
+                }
+                t.value = this.number(t); // Lnumber
+                return Scan.return_;
+
+            case 0x27 /* '\'' */:
+                if (issinglechar(this.byteAt(this.p + 1)) && this.byteAt(this.p + 2) === 0x27) {
+                    t.unsvalue = BigInt(this.byteAt(this.p + 1)); // simple one character literal
+                    t.value = TOK.charLiteral;
+                    this.p += 3;
+                } else if (this.Ccompile) {
+                    this.clexerCharConstant(t, 0);
+                } else {
+                    t.value = this.charConstant(t);
+                }
+                return Scan.return_;
+
+            case 0x75 /* 'u' */:
+            case 0x55 /* 'U' */:
+            case 0x4c /* 'L' */: {
+                if (!this.Ccompile) {
+                    return Scan.ident; // goto case_ident
+                }
+                if (this.byteAt(this.p + 1) === 0x27 /* '\'' */) {
+                    // C wide character constant
+                    let c = this.byteAt(this.p);
+                    if (c === 0x4c /* 'L' */) {
+                        // convert L to u or U
+                        c = this.wchar_tsize === 4 ? 0x75 /* 'u' */ : 0x55 /* 'U' */;
+                    }
+                    ++this.p;
+                    this.clexerCharConstant(t, c);
+                    return Scan.return_;
+                }
+                if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
+                    // C wide string literal
+                    const c = this.byteAt(this.p);
+                    ++this.p;
+                    this.escapeStringConstant(t);
+                    t.postfix =
+                        c === 0x4c /* 'L' */
+                            ? this.wchar_tsize === 2
+                                ? 0x77 /* 'w' */
+                                : 0x64 /* 'd' */
+                            : c === 0x75 /* 'u' */
+                              ? 0x77 /* 'w' */
+                              : 0x64 /* 'd' */;
+                    return Scan.return_;
+                }
+                if (this.byteAt(this.p + 1) === 0x38 /* '8' */ && this.byteAt(this.p + 2) === 0x22 /* '"' */) {
+                    // C UTF-8 string literal
+                    this.p += 2;
+                    this.escapeStringConstant(t);
+                    return Scan.return_;
+                }
+                return Scan.ident; // goto case_ident
+            }
+
+            case 0x72 /* 'r' */:
+                if (this.Ccompile || this.byteAt(this.p + 1) !== 0x22 /* '"' */) {
+                    return Scan.ident; // goto case_ident
+                }
+                this.p++;
+                // goto case '`';
+                this.wysiwygStringConstant(t);
+                return Scan.return_;
+            case 0x60 /* '`' */:
+                if (this.Ccompile) {
+                    return this.scanDefault(t) ? Scan.continue_ : Scan.return_; // goto default
+                }
+                this.wysiwygStringConstant(t);
+                return Scan.return_;
+            case 0x78 /* 'x' */:
+                if (this.byteAt(this.p + 1) !== 0x22 /* '"' */) {
+                    return Scan.ident; // goto case_ident
+                }
+                this.p++;
+                t.value = this.hexStringConstant(t);
+                return Scan.return_;
+            case 0x71 /* 'q' */:
+                if (this.Ccompile) {
+                    return Scan.ident; // goto case_ident
+                }
+                if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
+                    this.p++;
+                    this.delimitedStringConstant(t);
+                    return Scan.return_;
+                }
+                if (this.byteAt(this.p + 1) === 0x7b /* '{' */) {
+                    this.p++;
+                    this.tokenStringConstant(t);
+                    return Scan.return_;
+                }
+                return Scan.ident; // goto case_ident
+            case 0x69 /* 'i' */:
+                if (this.Ccompile) {
+                    return Scan.ident; // goto case_ident
+                }
+                if (this.byteAt(this.p + 1) === 0x22 /* '"' */) {
+                    this.p++; // skip the i
+                    this.escapeStringConstant(t, true);
+                    return Scan.return_;
+                }
+                if (this.byteAt(this.p + 1) === 0x60 /* '`' */) {
+                    this.p++; // skip the i
+                    this.wysiwygStringConstant(t, true);
+                    return Scan.return_;
+                }
+                if (this.byteAt(this.p + 1) === 0x71 /* 'q' */ && this.byteAt(this.p + 2) === 0x7b /* '{' */) {
+                    this.p += 2; // skip the i and q
+                    this.tokenStringConstant(t, true);
+                    return Scan.return_;
+                }
+                return Scan.ident; // goto case_ident
+            case 0x22 /* '"' */:
+                this.escapeStringConstant(t);
+                return Scan.return_;
+            default:
+                return assertUnreachable(); // scan() dispatches only the bytes listed above
+        }
+    }
+
+    /**
+     * The operator cases of `scan` (lexer.d:884-1180, `case '.'` .. `case '%'`), bodies unchanged.
+     * Returns true if the scan loop should `continue` (the ImportC `%:` digraph, which is `goto case
+     * '#'`), false when a token was produced and scan returns. Why a method: see scanLiteral.
+     */
+    private scanOperator(t: Token): boolean {
+        switch (this.byteAt(this.p)) {
+            case 0x2e /* '.' */:
+                this.p++;
+                if (isdigit(this.byteAt(this.p))) {
+                    // Note that we don't allow ._1 and ._ as valid floating point numbers.
+                    this.p--;
+                    t.value = this.inreal(t);
+                } else if (this.byteAt(this.p) === 0x2e /* '.' */) {
+                    if (this.byteAt(this.p + 1) === 0x2e) {
+                        this.p += 2;
+                        t.value = TOK.dotDotDot;
+                    } else {
+                        this.p++;
+                        t.value = TOK.slice;
+                    }
+                } else {
+                    t.value = TOK.dot;
+                }
+                return false;
+            case 0x26 /* '&' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.andAssign;
+                } else if (this.byteAt(this.p) === 0x26 /* '&' */) {
+                    this.p++;
+                    t.value = TOK.andAnd;
+                } else {
+                    t.value = TOK.and;
+                }
+                return false;
+            case 0x7c /* '|' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d) {
+                    this.p++;
+                    t.value = TOK.orAssign;
+                } else if (this.byteAt(this.p) === 0x7c /* '|' */) {
+                    this.p++;
+                    t.value = TOK.orOr;
+                } else {
+                    t.value = TOK.or;
+                }
+                return false;
+            case 0x2d /* '-' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d) {
+                    this.p++;
+                    t.value = TOK.minAssign;
+                } else if (this.byteAt(this.p) === 0x2d /* '-' */) {
+                    this.p++;
+                    t.value = TOK.minusMinus;
+                } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
+                    ++this.p;
+                    t.value = TOK.arrow;
+                } else {
+                    t.value = TOK.min;
+                }
+                return false;
+            case 0x2b /* '+' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d) {
+                    this.p++;
+                    t.value = TOK.addAssign;
+                } else if (this.byteAt(this.p) === 0x2b /* '+' */) {
+                    this.p++;
+                    t.value = TOK.plusPlus;
+                } else {
+                    t.value = TOK.add;
+                }
+                return false;
+            case 0x3c /* '<' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.lessOrEqual; // <=
+                } else if (this.byteAt(this.p) === 0x3c /* '<' */) {
+                    this.p++;
+                    if (this.byteAt(this.p) === 0x3d) {
+                        this.p++;
+                        t.value = TOK.leftShiftAssign; // <<=
+                    } else {
+                        t.value = TOK.leftShift; // <<
+                    }
+                } else if (this.byteAt(this.p) === 0x3a /* ':' */ && this.Ccompile) {
+                    ++this.p;
+                    t.value = TOK.leftBracket; // <:
+                } else if (this.byteAt(this.p) === 0x25 /* '%' */ && this.Ccompile) {
+                    ++this.p;
+                    t.value = TOK.leftCurly; // <%
+                } else {
+                    t.value = TOK.lessThan; // <
+                }
+                return false;
+            case 0x3e /* '>' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.greaterOrEqual; // >=
+                } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
+                    this.p++;
+                    if (this.byteAt(this.p) === 0x3d) {
+                        this.p++;
+                        t.value = TOK.rightShiftAssign; // >>=
+                    } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
+                        this.p++;
+                        if (this.byteAt(this.p) === 0x3d) {
+                            this.p++;
+                            t.value = TOK.unsignedRightShiftAssign; // >>>=
+                        } else {
+                            t.value = TOK.unsignedRightShift; // >>>
+                        }
+                    } else {
+                        t.value = TOK.rightShift; // >>
+                    }
+                } else {
+                    t.value = TOK.greaterThan; // >
+                }
+                return false;
+            case 0x21 /* '!' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.notEqual; // !=
+                } else {
+                    t.value = TOK.not; // !
+                }
+                return false;
+            case 0x3d /* '=' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.equal; // ==
+                } else if (this.byteAt(this.p) === 0x3e /* '>' */) {
+                    this.p++;
+                    t.value = TOK.goesTo; // =>
+                } else {
+                    t.value = TOK.assign; // =
+                }
+                return false;
+            case 0x7e /* '~' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.concatenateAssign; // ~=
+                } else {
+                    t.value = TOK.tilde; // ~
+                }
+                return false;
+            case 0x5e /* '^' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x5e /* '^' */) {
+                    this.p++;
+                    if (this.byteAt(this.p) === 0x3d) {
+                        this.p++;
+                        t.value = TOK.powAssign; // ^^=
+                    } else {
+                        t.value = TOK.pow; // ^^
+                    }
+                } else if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.xorAssign; // ^=
+                } else {
+                    t.value = TOK.xor; // ^
+                }
+                return false;
+            case 0x28 /* '(' */:
+                this.p++;
+                t.value = TOK.leftParenthesis;
+                return false;
+            case 0x29 /* ')' */:
+                this.p++;
+                t.value = TOK.rightParenthesis;
+                return false;
+            case 0x5b /* '[' */:
+                this.p++;
+                t.value = TOK.leftBracket;
+                return false;
+            case 0x5d /* ']' */:
+                this.p++;
+                t.value = TOK.rightBracket;
+                return false;
+            case 0x7b /* '{' */:
+                this.p++;
+                t.value = TOK.leftCurly;
+                return false;
+            case 0x7d /* '}' */:
+                this.p++;
+                t.value = TOK.rightCurly;
+                return false;
+            case 0x3f /* '?' */:
+                this.p++;
+                t.value = TOK.question;
+                return false;
+            case 0x2c /* ',' */:
+                this.p++;
+                t.value = TOK.comma;
+                return false;
+            case 0x3b /* ';' */:
+                this.p++;
+                t.value = TOK.semicolon;
+                return false;
+            case 0x3a /* ':' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3a /* ':' */) {
+                    ++this.p;
+                    t.value = TOK.colonColon;
+                } else if (this.byteAt(this.p) === 0x3e /* '>' */ && this.Ccompile) {
+                    ++this.p;
+                    t.value = TOK.rightBracket;
+                } else {
+                    t.value = TOK.colon;
+                }
+                return false;
+            case 0x24 /* '$' */:
+                this.p++;
+                t.value = TOK.dollar;
+                return false;
+            case 0x40 /* '@' */:
+                this.p++;
+                t.value = TOK.at;
+                return false;
+            case 0x2a /* '*' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.mulAssign;
+                } else {
+                    t.value = TOK.mul;
+                }
+                return false;
+            case 0x25 /* '%' */:
+                this.p++;
+                if (this.byteAt(this.p) === 0x3d /* '=' */) {
+                    this.p++;
+                    t.value = TOK.modAssign;
+                } else if (this.byteAt(this.p) === 0x3e /* '>' */ && this.Ccompile) {
+                    ++this.p;
+                    t.value = TOK.rightCurly;
+                } else if (this.byteAt(this.p) === 0x3a /* ':' */ && this.Ccompile) {
+                    // goto case '#';  // %: means #
+                    return this.scanPound(t);
+                } else {
+                    t.value = TOK.mod;
+                }
+                return false;
+            default:
+                return assertUnreachable(); // scan() dispatches only the bytes listed above
         }
     }
 

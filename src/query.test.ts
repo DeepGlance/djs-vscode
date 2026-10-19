@@ -148,10 +148,11 @@ function quiet<T>(f: () => T): { value: T; out: string } {
  * Writes the files and compiles `root` with the knob on, through `djsMainKept` or `djsMain`: the status and the
  * output, and the engine's mode ("fresh" for djsMain).
  */
-function compile(files: Record<string, string>, root: string, kept: boolean): { out: string; mode: string } {
+function compile(files: Record<string, string>, root: string, kept: boolean, extra: readonly string[] = []):
+    { out: string; mode: string } {
     for (const [name, text] of Object.entries(files))
         writeFileSync(join(dir, name), text);
-    const args = ["-c", "-o-", "-verrors=0", `-I${dir}`, join(dir, root)];
+    const args = ["-c", "-o-", "-verrors=0", ...extra, `-I${dir}`, join(dir, root)];
     const onFatal = (): boolean => true;
     const r = quiet(() => (kept ? djs.djsMainKept(args, onFatal, { docComments: true })
         : { status: djs.djsMain(args, onFatal, { docComments: true }), mode: "fresh" }));
@@ -320,6 +321,226 @@ size_t pz(R* r) { return r.q.bits.length; }
         expect(said(hover("fb.d", FB, "len().len", 0, 6))).toBe("function fb.T1.len");
         expect(said(hover("fb.d", FB, "q.bits", 0))).toBe("field fb.R.q");
         expect(said(hover("fb.d", FB, "q.bits", 0, 2))).toBe("field fb.Q.bits");
+    });
+});
+
+// built-in properties, names through public and local imports, template parameters without a node
+const BP = `module bp;
+struct S { int a; long b; }
+int[] arr;
+int[4] fixed;
+string[string] aa;
+string[] words(const(char)[] t) { return null; }
+size_t f(S s, const(char)[] text) {
+    S[] list;
+    size_t n = list.length + text.length + fixed.length + s.sizeof + S.sizeof;
+    float x = float.nan;
+    uint m = uint.max;
+    aa.remove("k");
+    return n + arr.ptr[0] + words(text).length + S.init.a;
+}
+struct J { int[string] m; ref int[string] obj() return { return m; } }
+void delegate(int code, string why) onDone;
+size_t g(J j) { int addr; j.obj.remove("x"); return "--port=".length + addr.sizeof; }
+`;
+const PA = "module pa;\npublic import pb;\nenum A_ONE = 1;\n";
+const PB = "module pb;\nenum B_TWO = 2;\nstruct Handle { int v; static Handle invalid() { return Handle(); } }\n";
+const PU = `module pu;
+import pa;
+int use() {
+    Handle h = Handle.invalid();
+    int x = B_TWO;
+    {
+        import io = pb;
+        x += io.B_TWO;
+    }
+    import pb : TWO = B_TWO;
+    return x + TWO + A_ONE + h.v;
+}
+`;
+const TP = `module tp;
+struct Layer { int x; }
+struct Other { int y; }
+enum isLayer(T) = is(T == struct);
+struct Node(CL, int N = 2) if (isLayer!CL) {
+    static if (N > 1) CL* layers;
+    int count() { static if (isLayer!CL) return N; else return 0; }
+}
+int use() { Node!Layer a; Node!(Other, 3) b; return a.count() + b.count(); }
+`;
+
+describe("built-in properties, imports, template parameters", () => {
+    /** The hover's first line and code block, or the miss's reason. */
+    function shown(token: string, nth = 0, skip = 0): string {
+        const h = hover("bp.d", BP, token, nth, skip);
+        return h.result === null ? `miss: ${h.reason}` : `${h.result.kind}: ${h.result.markdown.replace(/\n+/g, " ")}`;
+    }
+
+    test("a property of the operand's type: its type, the operand's; no declaration", () => {
+        compile({ "bp.d": BP }, "bp.d", true);
+        expect(shown("list.length", 0, 5)).toBe("property: *property* `length` of `S[]` ```d size_t length ```");
+        expect(shown("text.length", 0, 5))
+            .toBe("property: *property* `length` of `const(char)[]` ```d size_t length ```");
+        expect(shown("fixed.length", 0, 6)).toBe("property: *property* `length` of `int[4]` ```d size_t length ```");
+        expect(shown("s.sizeof", 0, 2)).toBe("property: *property* `sizeof` of `S` ```d size_t sizeof ```");
+        expect(shown("S.sizeof", 0, 2)).toBe("property: *property* `sizeof` of `S` ```d size_t sizeof ```");
+        expect(shown("float.nan", 0, 6)).toBe("property: *property* `nan` of `float` ```d float nan ```");
+        expect(shown("uint.max", 0, 5)).toBe("property: *property* `max` of `uint` ```d uint max ```");
+        expect(shown("aa.remove", 0, 3))
+            .toBe("property: *property* `remove` of `string[string]` ```d bool remove(string key) ```");
+        expect(shown("arr.ptr", 0, 4)).toBe("property: *property* `ptr` of `int[]` ```d int* ptr ```");
+        expect(shown("text).length", 0, 6)).toBe("property: *property* `length` of `string[]` ```d size_t length ```");
+        expect(shown("S.init", 0, 2)).toBe("property: *property* `init` of `S` ```d S init ```");
+        expect(target(definition("bp.d", BP, "list.length", 0, 5)))
+            .toBe("miss: a built-in property has no declaration");
+        expect(target(definition("bp.d", BP, "list.length"))).toBe("bp.d:7:8-12");
+        // a property call's return type; a string literal; the operand `.sizeof` folds away
+        expect(shown("obj.remove", 0, 4))
+            .toBe("property: *property* `remove` of `int[string]` ```d bool remove(string key) ```");
+        expect(shown("\".length", 0, 2)).toBe("property: *property* `length` of `string` ```d size_t length ```");
+        expect(said(hover("bp.d", BP, "addr.sizeof"))).toBe("local variable bp.g.addr");
+        expect(target(definition("bp.d", BP, "addr.sizeof"))).toBe("bp.d:16:20-24");
+    });
+
+    test("a parameter named in a delegate type: its type, its name as its declaration", () => {
+        expect(shown("code,")).toBe("parameter: *parameter* `code` ```d int code ```");
+        expect(target(definition("bp.d", BP, "why)"))).toBe("bp.d:15:31-34");
+    });
+
+    test("names through a public import, a function's imports: renamed, selective, a module's member", () => {
+        compile({ "pa.d": PA, "pb.d": PB, "pu.d": PU }, "pu.d", true);
+        const both = (token: string, skip = 0): string =>
+            `${said(hover("pu.d", PU, token, 0, skip))} | ${target(definition("pu.d", PU, token, 0, skip))}`;
+        // `Handle` and `B_TWO` through pa's public import of pb, where the analysis left no node
+        expect(both("Handle.invalid")).toBe("struct pb.Handle | pb.d:2:7-13");
+        expect(both("B_TWO;")).toBe("variable pb.B_TWO | pb.d:1:5-10");
+        // a renamed import in a block: its name, at the import and at a use; the module's member after it
+        expect(both("io = pb")).toBe("import pu.use.io | pu.d:6:20-22");
+        expect(both("io.B_TWO")).toBe("import pu.use.io | pu.d:6:20-22");
+        expect(both("io.B_TWO", 3)).toBe("variable pb.B_TWO | pb.d:1:5-10");
+        // a selective import's new name in the function's body
+        expect(both("TWO +")).toBe("variable pb.B_TWO | pb.d:1:5-10");
+        expect(both("A_ONE")).toBe("variable pa.A_ONE | pa.d:2:5-10");
+    });
+
+    test("a template's parameter where the analysis left no node: the argument, of the instance there", () => {
+        compile({ "tp.d": TP }, "tp.d", true);
+        const shown = (token: string, nth = 0): string => {
+            const h = hover("tp.d", TP, token, nth);
+            const inst = h.result?.markdown.match(/In instance .*/)?.[0] ?? "";
+            return `${said(h)} ${inst} | ${target(definition("tp.d", TP, token, nth))}`;
+        };
+        const layer = "struct tp.Layer In instance `Node!(Layer, 2)` (1 of 2 instances). | tp.d:1:7-12";
+        const n = "variable tp.N In instance `Node!(Layer, 2)` (1 of 2 instances). | tp.d:4:20-21";
+        // the parameter list, the constraint, a `static if` condition: no node; a field's type: the analysed one
+        expect([shown("CL, int"), shown("N = 2"), shown("CL) {"), shown("N > 1"), shown("CL* layers")])
+            .toEqual([layer, n, layer, n, layer]);
+        // in an instance's function: that instance's argument
+        expect([shown("CL) return"), shown("N; else")]).toEqual([layer, n]);
+    });
+});
+
+// round 2: no answer where the compile resolved nothing, a plain import's name as its package, no pick among imports
+const UT = `module ut;
+int count;
+int f() { return count; }
+unittest {
+    int count = 3;
+    count++;
+    f();
+}
+int g() { return count; }
+`;
+const IP = `module ip;
+import core.stdc.stdio;
+int f() {
+    import core.stdc.string;
+    return cast(int) core.stdc.string.strlen("x") + core.stdc.stdio.EOF;
+}
+`;
+const AMA = "module ama;\nenum K = 1;\n";
+const AMB = "module amb;\nenum K = 2;\n";
+const AMC = "module amc;\npublic import amb;\n";
+const AMD = "module amd;\npublic import amb;\nenum K = 4;\n";
+const AMU = `module amu;
+import ama;
+import amc;
+int bad() { return K; }
+int good() { return ama.K + amb.K; }
+`;
+const AMV = "module amv;\nimport amd;\nint one() { return K; }\n";
+const MS = `module ms;
+import std.typecons : Tuple;
+class C { int f; }
+struct U { bool force; }
+Tuple!(bool, "terminated", int, "status") wait() { return typeof(return)(true, 0); }
+bool forced(T)(T* cl) {
+    static if (is(typeof(cl.force) : bool))
+        return cl.force;
+    else
+        return false;
+}
+int use(Object o, int[]* q, C c) {
+    import cstdio = core.stdc.stdio;
+    cstdio.fflush(cstdio.stdout);
+    auto st = wait();
+    U u;
+    bool b = st.terminated && forced(&u) && forced(&o);
+    return (cast(C) o).f + (c).f + cast(int) (*q).length + b;
+}
+`;
+
+describe("no answer the compile did not resolve, imports' names, operands and aliases", () => {
+    test("a unittest body the parser skipped answers nothing; with -unittest, its analysis", () => {
+        compile({ "ut.d": UT }, "ut.d", true);
+        // without -unittest the module's `count` and `f` are not what the compile resolved there: it resolved nothing
+        expect(said(hover("ut.d", UT, "count++"))).toBe("miss: no symbol at the position");
+        expect(said(hover("ut.d", UT, "f();"))).toBe("miss: no symbol at the position");
+        expect(target(definition("ut.d", UT, "count = 3"))).toBe("miss: no symbol at the position");
+        // the token after the body's `}` is outside it
+        expect(said(hover("ut.d", UT, "g()"))).toBe("function ut.g");
+        expect(said(hover("ut.d", UT, "count; }", 1))).toBe("variable ut.count");
+        compile({ "ut.d": UT }, "ut.d", true, ["-unittest"]);
+        expect(said(hover("ut.d", UT, "count++"))).toBe("local variable ut.__unittest_L4_C1.count");
+        expect(said(hover("ut.d", UT, "f();"))).toBe("function ut.f");
+    });
+
+    test("a plain import's name is its package, in a body and at the module, as the analysis resolves it", () => {
+        compile({ "ip.d": IP }, "ip.d", true);
+        expect(said(hover("ip.d", IP, "core.stdc.string.strlen"))).toBe("package core");
+        expect(said(hover("ip.d", IP, "core.stdc.stdio.EOF"))).toBe("package core");
+        expect(said(hover("ip.d", IP, "stdio.EOF"))).toBe("module core.stdc.stdio");
+        expect(said(hover("ip.d", IP, "EOF"))).toBe("enum member core.stdc.stdio.EOF");
+        expect(target(definition("ip.d", IP, "core.stdc.string.strlen"))).toBe("miss: a package has no declaration");
+    });
+
+    test("a name two imports declare answers nothing; a module's own member hides its public imports'", () => {
+        const files = { "ama.d": AMA, "amb.d": AMB, "amc.d": AMC, "amd.d": AMD, "amu.d": AMU, "amv.d": AMV };
+        compile(files, "amu.d", true);
+        // `K` is ama's and, through amc's public import, amb's: ldc2 reports the ambiguity, the body has errors
+        expect(said(hover("amu.d", AMU, "K; }"))).toBe("miss: no symbol at the position");
+        expect(said(hover("amu.d", AMU, "K +", 0))).toBe("variable ama.K");
+        expect(said(hover("amu.d", AMU, "K; }", 1))).toBe("variable amb.K");
+        compile(files, "amv.d", true);
+        expect(said(hover("amv.d", AMV, "K; }"))).toBe("variable amd.K");
+    });
+
+    test("a parenthesised operand's member, an alias's runtime target, a Tuple's field, a name in `typeof`", () => {
+        compile({ "ms.d": MS }, "ms.d", true);
+        const both = (token: string, nth = 0, skip = 0): string =>
+            `${said(hover("ms.d", MS, token, nth, skip))} | ${target(definition("ms.d", MS, token, nth, skip))}`;
+        // the access sits inside the parentheses (`o`), or the variable at the `(`
+        expect(both("f + (c)")).toBe("field ms.C.f | ms.d:2:14-15");
+        expect(both("c).f")).toBe("parameter ms.use.c | ms.d:11:30-31");
+        expect(both("f + cast")).toBe("field ms.C.f | ms.d:2:14-15");
+        expect(said(hover("ms.d", MS, "length"))).toBe("property length");
+        // the analysis' node is the alias's target, under another name: at the token, at the chain's start
+        expect(said(hover("ms.d", MS, "stdout"))).toBe("variable core.stdc.stdio.__stdoutp");
+        expect(said(hover("ms.d", MS, "terminated &&")))
+            .toBe("field std.typecons.Tuple!(bool, \"terminated\", int, \"status\").Tuple.__expand_field_0");
+        // `typeof` keeps no node: the parameter of the first instance, its type's member
+        expect(both("cl.force) :")).toBe("parameter ms.forced!(U).forced.cl | ms.d:5:18-20");
+        expect(both("force) :")).toBe("field ms.U.force | ms.d:3:16-21");
     });
 });
 
@@ -1444,14 +1665,13 @@ int use() {
             "2 ptr property", "2 sizeof property", "2 stringof property"]);
     });
 
-    test("misses: an unresolved name, a comment, a number, no dot", () => {
+    test("misses: an unresolved name, a comment, a number", () => {
         const typed = CP.replace("    // p.x in a comment", "    nothere.");
         expect(labels(complete(typed, "nothere."))).toEqual(
             ["miss: the expression before the `.` is not resolved: `nothere` is not found"]);
         expect(labels(complete(CP, "// p."))).toEqual(["miss: the `.` is in a comment or a literal"]);
         const number = CP.replace("    // p.x in a comment", "    auto f = 1.");
         expect(labels(complete(number, "= 1."))).toEqual(["miss: the `.` follows a number"]);
-        expect(labels(complete(CP, "int s"))).toEqual(["miss: no `.` before the position"]);
         expect(labels(djs.queryCompletion(join(dir, "nope.d"), CP, { line: 0, character: 0 })))
             .toEqual(["miss: the file is not in the last compile"]);
     });
@@ -1465,6 +1685,127 @@ int use() {
         const local = CP.replace("    // p.x in a comment", "    c.");
         expect(labels(complete(local, "    c.")).filter((l) => l.startsWith("2 m"))).toEqual(["2 mangleof property",
             "2 max property", "2 min property"]);
+    });
+});
+
+describe("completion without a dot: the names in scope", () => {
+    const SCLIB = `module sclib;
+/// Library summary line.
+int libFun(int a) { return a; }
+private int hidden() { return 1; }
+public import sccore;
+`;
+    const SCCORE = `module sccore;
+int coreFun() { return 0; }
+`;
+    const SC = `module sc;
+import sclib;
+import io = sclib;
+
+int global;
+/// A point.
+struct Pt {
+    int x;
+    static int count;
+    int len() const { return x + 0; }
+    int len(int k) const { return k; }
+    void touch() { x = 1; }
+    static int make() { return count; }
+}
+class Base { int baseField; }
+class Derived : Base { int own; void m() { own = 1; } }
+int blocks(int a) {
+    int b;
+    { int inner; inner = 1; }
+    foreach (i; 0 .. 3) { int loop = i; }
+    if (auto q = a) { b = q; }
+    int after;
+    int nested(int n) { return n + b; }
+    return after + nested(1);
+}
+T twice(T)(T v) { return v * 2; }
+int user() {
+    import sccore : coreFun;
+    import cio = sccore;
+    return twice(2) + coreFun() + global + cio.coreFun();
+}
+int broken(int a) {
+    int first = a;
+    return first + nowhere;
+}
+void never(T)(T t) { int z = 0; }
+`;
+
+    beforeAll(() => {
+        compile({ "sclib.d": SCLIB, "sccore.d": SCCORE, "sc.d": SC }, "sc.d", true);
+    });
+
+    /** The completion at the end of the `nth` occurrence of `token` in `text`, `back` characters before it. */
+    function complete(text: string, token: string, nth = 0, back = 0): Djs.CompletionAnswer {
+        return djs.queryCompletion(join(dir, "sc.d"), text, at(text, token, nth, token.length - back));
+    }
+
+    /** The items of `groups` as `group label kind`, or the miss's reason. */
+    function labels(a: Djs.CompletionAnswer, groups: readonly number[] = [0, 1, 2]): string[] {
+        return a.result === null ? [`miss: ${a.reason}`]
+            : a.result.items.filter((i) => groups.includes(i.group)).map((i) => `${i.group} ${i.label} ${i.kind}`);
+    }
+
+    const MODULE = ["2 Base class", "2 Derived class", "2 Pt struct", "2 blocks function", "2 broken function",
+        "2 global variable", "2 io module", "2 never function", "2 object module", "2 sclib module", "2 twice function",
+        "2 user function"];
+
+    test("locals declared before, in a block still open; parameters, a nested function; the module's names", () => {
+        const a = complete(SC, "return after", 0, 5);
+        expect(labels(a)).toEqual(["0 a variable", "0 after variable", "0 b variable", "0 nested function",
+            ...MODULE]);
+        expect(a.result!.range).toEqual({ start: at(SC, "after +"), end: at(SC, "after +") });
+        expect(a.result!.moved).toBe(false);
+        expect(labels(complete(SC, "{ int loop = i", 0, 1), [0])).toEqual(["0 a variable", "0 b variable",
+            "0 i variable", "0 loop variable"]);
+        expect(labels(complete(SC, "b = q", 0, 1), [0])).toEqual(["0 a variable", "0 b variable", "0 q variable"]);
+        expect(labels(complete(SC, "return n + b", 0, 1), [0])).toEqual(["0 a variable", "0 after variable",
+            "0 b variable", "0 n variable", "0 nested function"]);
+        expect(labels(complete(SC, "return v", 0, 1), [0])).toEqual(["0 T typeParameter", "0 v variable"]);
+        const items = new Map(a.result!.items.map((i) => [i.label, i]));
+        expect(items.get("b")).toMatchObject({ detail: "int b", group: 0 });
+        expect(items.get("Pt")).toMatchObject({ documentation: "A point.", group: 2 });
+    });
+
+    test("the imported modules' public names, their public imports', a function-local import's", () => {
+        const imported = labels(complete(SC, "return after", 0, 5), [3]);
+        expect(imported).toEqual(expect.arrayContaining(["3 libFun function", "3 coreFun function", "3 Object class"]));
+        expect(imported.filter((l) => l.includes("hidden"))).toEqual([]);
+        const lib = complete(SC, "return after", 0, 5).result!.items.find((i) => i.label === "libFun");
+        expect(lib).toMatchObject({ detail: "int libFun(int a)", documentation: "Library summary line." });
+        expect(labels(complete(SC, "return twice", 0, 5), [0, 1])).toEqual(["0 cio module"]);
+        expect(labels(complete(SC, "return twice", 0, 5), [3])).toContain("3 coreFun function");
+    });
+
+    test("the members of `this`, by its qualifier; a static member function's; a class's with its bases'", () => {
+        const members = ["1 count variable", "1 len method", "1 make method", "1 touch method", "1 x field"];
+        expect(labels(complete(SC, "{ x = 1", 0, 5), [1])).toEqual(members);
+        expect(labels(complete(SC, "const { return x", 0, 1), [1]))
+            .toEqual(members.filter((l) => !l.includes("touch")));
+        expect(labels(complete(SC, "{ return count", 0, 5), [1])).toEqual(["1 count variable", "1 make method"]);
+        expect(labels(complete(SC, "{ own = 1", 0, 7), [1])).toEqual(["1 Monitor interface", "1 baseField field",
+            "1 factory method", "1 m method", "1 opCmp method", "1 opEquals method", "1 own field",
+            "1 toHash method", "1 toString method"]);
+    });
+
+    test("a body with errors: its locals by their location; a name typed after the compile; the misses", () => {
+        expect(labels(complete(SC, "return first", 0, 5), [0])).toEqual(["0 a variable", "0 first variable"]);
+        const typed = SC.replace("    int after;", "    gl\n    int after;");
+        const t = djs.queryCompletion(join(dir, "sc.d"), typed, at(typed, "    gl", 0, 6));
+        expect(t.result!.moved).toBe(true);
+        expect(t.result!.range).toEqual({ start: at(typed, "    gl", 0, 4), end: at(typed, "    gl", 0, 6) });
+        expect(labels(t, [0])).toEqual(["0 a variable", "0 b variable"]);
+        expect(labels(t, [2])).toContain("2 global variable");
+        expect(labels(complete(SC, "/// A po"))).toEqual(["miss: the position is in a comment or a literal"]);
+        const number = SC.replace("    int after;", "    int after = 12");
+        expect(labels(complete(number, "after = 12"))).toEqual(["miss: the position is in a number"]);
+        expect(labels(complete(SC, "int z = 0", 0, 1)))
+            .toEqual(["miss: the function at the position was not analysed"]);
     });
 });
 
@@ -1723,6 +2064,378 @@ void f() {
     });
 });
 
+const NV = `module nv;
+
+import lib;
+import lib : mul;
+
+/// A shape.
+struct Shape {
+    int w;
+    int h;
+    this(int s) { w = s; h = s; }
+    int area() const { return w * h; }
+    @property int width() const { return w; }
+}
+
+class Base { void run() {} }
+interface Named { string name(); }
+class Derived : Base, Named { override string name() { return "d"; } }
+
+enum Color { red, green }
+enum { loose = 1 }
+enum limit = 10;
+alias Size = int;
+
+struct Pair(T) {
+    T first;
+    T second;
+    T sum() { return first + second; }
+}
+/// Twice \`x\`.
+T twice(T)(T x) { return x * 2; }
+
+template Kit(T) {
+    alias Item = T;
+    enum size = cast(int) T.sizeof;
+}
+
+mixin("int mixedVar = 1;");
+
+version (none) { int hidden; } else { int shown; }
+
+/// Grows a shape.
+int grow(Shape s, int by) { return s.area + by; }
+/// Grows a number.
+int grow(int a) { return a; }
+
+int outer(int a) {
+    int inner(int b) { return a + b; }
+    struct Local { int z; }
+    return inner(a);
+}
+
+unittest { assert(true); }
+
+int main() {
+    Shape s = Shape(2);
+    int r = s.grow(3) + grow(1) + outer(s.w) + twice(4);
+    Pair!int p;
+    p.first = r;
+    return p.sum() + Kit!int.size + limit + mixedVar + add(1, 2) + mul(2, 3) + loose + Color.red;
+}
+
+enum code = q{ int fromMixin() { return limit; } };
+mixin(code);
+
+struct Money(T) {
+    T c;
+    /// Adds two amounts.
+    Money opBinary(string op : "+")(Money o) const { return Money(c + o.c); }
+}
+int spend() { Money!int a, b; return (a + b).c; }
+`;
+
+/** An outline as indented lines: kind, name, detail, the selection's start. */
+function outline(symbols: readonly Djs.DocumentSymbol[], depth = 0): string[] {
+    return symbols.flatMap((s) => [
+        `${"  ".repeat(depth)}${s.kind} ${s.name}${s.detail !== "" ? ` [${s.detail}]` : ""} `
+            + `${s.selectionRange.start.line}:${s.selectionRange.start.character}`,
+        ...outline(s.children, depth + 1)]);
+}
+
+describe("navigation: the outline", () => {
+    beforeAll(() => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+    });
+
+    test("the declarations as a tree: aggregates, templates, nested functions, mixins, the chosen branch", () => {
+        const a = djs.queryDocumentSymbols(join(dir, "nv.d"), NV);
+        expect(outline(a.result!.symbols)).toEqual([
+            "module nv 0:7",
+            "namespace imports 2:7",
+            "  module lib 2:7",
+            "  module lib [: mul] 3:7",
+            "struct Shape 6:7",
+            "  field w [int] 7:8",
+            "  field h [int] 8:8",
+            "  constructor this [ref Shape(int s)] 9:4",
+            "  method area [const int()] 10:8",
+            "  property width [const @property int()] 11:18",
+            "class Base [: object.Object] 14:6",
+            "  method run [void()] 14:18",
+            "interface Named 15:10",
+            "  method name [string()] 15:25",
+            "class Derived [: nv.Base, nv.Named] 16:6",
+            "  method name [string()] 16:46",
+            "enum Color [int] 18:5",
+            "  enumMember red [0] 18:13",
+            "  enumMember green [1] 18:18",
+            "enumMember loose [1] 19:7",
+            "constant limit [int] 20:5",
+            "typeParameter Size [= int] 21:6",
+            "struct Pair [(T)] 23:7",
+            "  field first [T] 24:6",
+            "  field second [T] 25:6",
+            "  method sum [T()] 26:6",
+            "function twice [(T) T(T x)] 29:2",
+            "namespace Kit [(T)] 31:9",
+            "  typeParameter Item [= T] 32:10",
+            "  constant size 33:9",
+            "variable mixedVar [(mixin) int] 36:0",
+            "variable shown [int] 38:42",
+            "function grow [int(Shape s, int by)] 41:4",
+            "function grow [int(int a)] 43:4",
+            "function outer [int(int a)] 45:4",
+            "  function inner [pure nothrow @nogc @safe int(int b)] 46:8",
+            "  struct Local 47:11",
+            "    field z [int] 47:23",
+            "function unittest 51:0",
+            "function main [int()] 53:4",
+            "constant code [string] 61:5",
+            "function fromMixin [(mixin) int()] 62:0",
+            "struct Money [(T)] 64:7",
+            "  field c [T] 65:6",
+            "  method opBinary [(string op : \"+\") const Money(Money o)] 67:10",
+            "function spend [int()] 69:4",
+        ]);
+        const byName = new Map(a.result!.symbols.map((x) => [x.name, x.range]));
+        // from the line's first token to the end of the block or the `;`
+        expect(byName.get("Shape")).toEqual({ start: at(NV, "struct Shape"), end: at(NV, "}\n\nclass", 0, 1) });
+        expect(byName.get("twice")).toEqual({ start: at(NV, "T twice"), end: at(NV, "* 2; }", 0, 6) });
+        expect(byName.get("limit")).toEqual({ start: at(NV, "enum limit"), end: at(NV, "= 10;", 0, 5) });
+        expect(byName.get("mixedVar")).toEqual({ start: at(NV, "mixin("), end: at(NV, "1;\");", 0, 5) });
+    });
+
+    test("a text other than the compiled one: stale; a file outside the compile: a miss", () => {
+        expect(djs.queryDocumentSymbols(join(dir, "nv.d"), `${NV} `)).toEqual(
+            { result: null, stale: true, reason: djs.STALE_REASON });
+        expect(djs.queryDocumentSymbols(join(dir, "none.d"), "").result).toBeNull();
+    });
+});
+
+/** The references at a token: `file:line:character`, `*` after the declaration's. */
+function refs(file: string, text: string, token: string, nth = 0, skip = 0): string[] {
+    const p = at(text, token, nth, skip);
+    const a = djs.queryReferences(join(dir, file), p.line, p.character, text);
+    if (a.result === null)
+        return [`miss: ${a.reason}`];
+    return a.result.references.map((r) => `${r.file.slice(dir.length + 1)}:${r.range.start.line}:`
+        + `${r.range.start.character}${r.declaration ? "*" : ""}`);
+}
+
+describe("navigation: references", () => {
+    beforeAll(() => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+    });
+
+    test("a function through UFCS, one overload; a member; an aggregate through its constructor", () => {
+        expect(refs("nv.d", NV, "grow(Shape")).toEqual(["nv.d:41:4*", "nv.d:55:14"]);
+        expect(refs("nv.d", NV, "grow(1)")).toEqual(["nv.d:43:4*", "nv.d:55:24"]);
+        expect(refs("nv.d", NV, "w;")).toEqual(["nv.d:7:8*", "nv.d:9:18", "nv.d:10:30", "nv.d:11:41",
+            "nv.d:55:42"]);
+        expect(refs("nv.d", NV, "Shape(2)")).toEqual(["nv.d:6:7*", "nv.d:41:9", "nv.d:54:4", "nv.d:54:14"]);
+    });
+
+    test("a template parameter, a member of a template's instances, a function template", () => {
+        expect(refs("nv.d", NV, "T first")).toEqual(["nv.d:23:12*", "nv.d:24:4", "nv.d:25:4", "nv.d:26:4"]);
+        expect(refs("nv.d", NV, "first;")).toEqual(["nv.d:24:6*", "nv.d:26:21", "nv.d:57:6"]);
+        expect(refs("nv.d", NV, "twice(4)")).toEqual(["nv.d:29:2*", "nv.d:55:47"]);
+        expect(refs("nv.d", NV, "T twice")).toEqual(["nv.d:29:0", "nv.d:29:8*", "nv.d:29:11"]);
+        expect(refs("nv.d", NV, "Pair!int")).toEqual(["nv.d:23:7*", "nv.d:56:4"]);
+    });
+
+    test("folded names through the fallback; a name another module declares, a selective import's", () => {
+        expect(refs("nv.d", NV, "red,")).toEqual(["nv.d:18:13*", "nv.d:58:93"]);
+        expect(refs("nv.d", NV, "limit +")).toEqual(["nv.d:20:5*", "nv.d:58:36"]);
+        expect(refs("nv.d", NV, "add(1")).toEqual(["nv.d:58:55"]);
+        expect(refs("nv.d", NV, "mul;")).toEqual(["nv.d:3:13", "nv.d:58:67"]);
+    });
+
+    test("misses: no symbol, another text", () => {
+        expect(refs("nv.d", NV, "return p")).toEqual(["miss: no symbol at the position"]);
+        expect(djs.queryReferences(join(dir, "nv.d"), 0, 0, `${NV} `).result).toBeNull();
+    });
+});
+
+const EB = `module eb;
+
+enum code = q{ int fromCode() { return 1; } };
+mixin(code);
+mixin(\`int raw = 2;\`);
+int g = 1;
+struct S { int f; int m() { return f; } }
+
+int broken(int a) {
+    S s;
+    int k = a + g;
+    return k + s.f + s.m() + raw + fromCode() + nowhere;
+}
+
+int withBlock(S w) {
+    with (w) { m(); }
+    return g + nowhere;
+}
+
+int lambdas() {
+    return nowhere + (g => g * 2)(1);
+}
+`;
+
+describe("navigation: a string mixin's declaration, a body with errors", () => {
+    test("a global a string mixin declares, at its use: the hover, the name in the literal, the references", () => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+        expect(said(hover("nv.d", NV, "mixedVar +"))).toBe("variable nv.mixedVar");
+        expect(target(definition("nv.d", NV, "mixedVar +"))).toBe("nv.d:36:11-19");
+        expect(refs("nv.d", NV, "mixedVar +")).toEqual(["nv.d:36:11*", "nv.d:58:44"]);
+        // the shape of the miss first seen: the use in a `return` whose expression has an error (ulong to int)
+        const failing = NV.replace("cast(int) T.sizeof", "T.sizeof");
+        try {
+            expect(compile({ "nv.d": failing }, "nv.d", true).out).toContain("cannot be implicitly converted");
+            expect(said(hover("nv.d", failing, "mixedVar +"))).toBe("variable nv.mixedVar");
+            expect(refs("nv.d", failing, "mixedVar +")).toEqual(["nv.d:36:11*", "nv.d:58:44"]);
+            expect(said(hover("nv.d", failing, "sum() +"))).toBe("function nv.Pair!int.Pair.sum");
+            expect(refs("nv.d", failing, "p.first")).toEqual(["nv.d:56:13*", "nv.d:57:4", "nv.d:58:11"]);
+        } finally {
+            compile({ "nv.d": NV }, "nv.d", true);
+        }
+    });
+
+    test("an expression with an error: its names by position; not where a `with` or a lambda could hide one", () => {
+        expect(compile({ "eb.d": EB }, "eb.d", true).out).toContain("undefined identifier `nowhere`");
+        expect(said(hover("eb.d", EB, "k + s"))).toBe("local variable eb.broken.k");
+        expect(said(hover("eb.d", EB, "f + s"))).toBe("field eb.S.f");
+        expect(said(hover("eb.d", EB, "m() + raw"))).toBe("function eb.S.m");
+        expect(target(definition("eb.d", EB, "raw +"))).toBe("eb.d:4:11-14");
+        // a mixed-in string built elsewhere: the `mixin` keyword, as the outline selects it; no declaration listed
+        expect(target(definition("eb.d", EB, "fromCode()", 1))).toBe("eb.d:3:0-5");
+        expect(refs("eb.d", EB, "fromCode()", 1)).toEqual(["eb.d:11:35"]);
+        expect(refs("eb.d", EB, "g;")).toEqual(["eb.d:5:4*", "eb.d:10:16"]);
+        expect(said(hover("eb.d", EB, "g + nowhere"))).toBe("miss: no symbol at the position");
+        expect(said(hover("eb.d", EB, "g * 2"))).toBe("miss: no symbol at the position");
+    });
+});
+
+/** A rename's edits as `line:character`, or the miss's reason. */
+function renamed(text: string, token: string, newName: string, nth = 0, skip = 0): string[] {
+    const p = at(text, token, nth, skip);
+    const a = djs.queryRename(join(dir, "nv.d"), p.line, p.character, text, newName);
+    return a.result === null ? [`miss: ${a.reason}`]
+        : a.result.edits.map((e) => `${e.file.slice(dir.length + 1)}:${e.range.start.line}:${e.range.start.character}`);
+}
+
+/** `text` with every edit of a rename applied (one file). */
+function applied(text: string, edits: readonly { range: Djs.QueryRange }[], newName: string): string {
+    const lines = text.split("\n");
+    for (const e of [...edits].sort((a, b) => b.range.start.line - a.range.start.line
+        || b.range.start.character - a.range.start.character)) {
+        const l = lines[e.range.start.line]!;
+        lines[e.range.start.line] = l.slice(0, e.range.start.character) + newName + l.slice(e.range.end.character);
+    }
+    return lines.join("\n");
+}
+
+describe("navigation: rename", () => {
+    beforeAll(() => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+    });
+
+    test("a function through UFCS, a member, a template parameter: the edits, and the renamed text compiles", () => {
+        expect(renamed(NV, "grow(Shape", "enlarge")).toEqual(["nv.d:41:4", "nv.d:55:14"]);
+        expect(renamed(NV, "h;", "height")).toEqual(["nv.d:8:8", "nv.d:9:25", "nv.d:10:34"]);
+        expect(renamed(NV, "T first", "E")).toEqual(["nv.d:23:12", "nv.d:24:4", "nv.d:25:4", "nv.d:26:4"]);
+        expect(compile({ "nv.d": NV }, "nv.d", true).out).not.toContain("Error");
+        let text = NV;
+        try {
+            for (const [token, name] of [["grow(Shape", "enlarge"], ["h;", "height"], ["T first", "E"]] as const) {
+                const p = at(text, token);
+                const a = djs.queryRename(join(dir, "nv.d"), p.line, p.character, text, name);
+                text = applied(text, a.result!.edits, name);
+                expect(compile({ "nv.d": text }, "nv.d", true).out).not.toContain("Error");
+            }
+        } finally {
+            compile({ "nv.d": NV }, "nv.d", true);
+        }
+        expect(text).toContain("s.enlarge(3)");
+    });
+
+    test("refused, with the reason: special functions, implicit names, imported modules, mixin texts, clashes", () => {
+        const prepare = (token: string, nth = 0, skip = 0): string => {
+            const p = at(NV, token, nth, skip);
+            const a = djs.queryPrepareRename(join(dir, "nv.d"), p.line, p.character, NV);
+            return a.result === null ? `miss: ${a.reason}` : `${a.result.placeholder} ${a.result.range.start.line}`;
+        };
+        expect(prepare("grow(Shape")).toBe("grow 41");
+        expect(prepare("this(int")).toBe("miss: a special function has no name of its own");
+        expect(prepare("lib : mul")).toBe("miss: a module is renamed with its file");
+        expect(prepare("add(1")).toBe(`miss: \`add\` is declared in ${join(dir, "lib.d")}, which the last compile only `
+            + "imports: its other uses are not analysed");
+        expect(prepare("limit +")).toBe(
+            `miss: \`limit\` is spelled in the text of a string mixin at ${join(dir, "nv.d")}:62`);
+        expect(renamed(NV, "w;", "width")).toEqual(["miss: `width` is already declared in `nv.Shape`"]);
+        expect(renamed(NV, "w;", "int")).toEqual(["miss: `int` is not a name a declaration can take"]);
+        expect(renamed(NV, "T first", "first")).toEqual(["miss: `first` is already used in the template"]);
+    });
+});
+
+/** The signature help at a token: the active signature's label and parameter, then the other labels. */
+function signatures(text: string, token: string, nth = 0, skip = 0): string[] {
+    const p = at(text, token, nth, skip);
+    const a = djs.querySignatureHelp(join(dir, "nv.d"), p.line, p.character, text);
+    if (a.result === null)
+        return [`miss: ${a.reason}`];
+    const r = a.result;
+    const sig = r.signatures[r.activeSignature]!;
+    const span = sig.parameters[r.activeParameter];
+    return [`${sig.label} [${span !== undefined ? sig.label.slice(...span) : "-"}] ${sig.documentation}`.trim(),
+        ...r.signatures.filter((_, i) => i !== r.activeSignature).map((x) => x.label)];
+}
+
+describe("doc summaries where the picked overload has one", () => {
+    beforeAll(() => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+    });
+
+    test("an operator's hover: the lowering and the summary of a member template of an instance; a UFCS item", () => {
+        const plus = hover("nv.d", NV, "(a + b).c", 0, 3);
+        expect(plus.result!.markdown).toMatch(/Lowered:\n\n```d\na\.opBinary!"\+"\(b\)\n```\n\nAdds two amounts\./);
+        const typed = NV.replace("    p.first = r;", "    p.first = r.;");
+        const items = djs.queryCompletion(join(dir, "nv.d"), typed, at(typed, "r.;", 0, 2)).result!.items;
+        expect(items.find((i) => i.label === "grow")?.documentation).toBe("Grows a number.");
+    });
+});
+
+describe("navigation: signature help", () => {
+    beforeAll(() => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+    });
+
+    test("the overload picked first, the argument under the cursor, UFCS, a constructor, a template's instance", () => {
+        expect(signatures(NV, "s.grow(3)", 0, 7)).toEqual(["int grow(Shape s, int by) [int by] Grows a shape.",
+            "int grow(int a)"]);
+        expect(signatures(NV, "grow(1)", 0, 5)).toEqual(["int grow(int a) [int a] Grows a number.",
+            "int grow(Shape s, int by)"]);
+        expect(signatures(NV, "Shape(2)", 0, 6)).toEqual(["Shape(int s) [int s]"]);
+        expect(signatures(NV, "twice(4)", 0, 6)).toEqual(["int twice(int x) [int x] Twice `x`."]);
+        expect(signatures(NV, "add(1, 2)", 0, 7)).toEqual(["int add(int a, int b) [int b] Adds two numbers."]);
+        expect(signatures(NV, "outer(s.w)", 0, 8)).toEqual(["int outer(int a) [int a]"]);
+    });
+
+    test("a call being typed: the name looked up, the template's signature; misses", () => {
+        const typed = NV.replace("unittest {", "int typing(Shape s0) { return add(1, twice(\n}\nunittest {");
+        compile({ "nv.d": typed }, "nv.d", true);
+        try {
+            expect(signatures(typed, "add(1, twice(", 0, 7))
+                .toEqual(["int add(int a, int b) [int b] Adds two numbers."]);
+            expect(signatures(typed, "add(1, twice(", 0, 13)).toEqual(["T twice(T)(T x) [T x] Twice `x`."]);
+        } finally {
+            compile({ "nv.d": NV }, "nv.d", true);
+        }
+        expect(signatures(NV, "int main() {", 0, 12)).toEqual(["miss: not inside a call's parentheses"]);
+        expect(signatures(`${NV} `, "grow(1)", 0, 5)).toEqual([`miss: ${djs.STALE_REASON}`]);
+    });
+});
+
 describe("the read-only contract", () => {
     test("a query runs no semantic: no `optimize` while printing, no diagnostic on `__ctfe`", async () => {
         // hdrgen folds a variable template argument with `optimize`, which runs the initializer of `lastLevel`
@@ -1825,6 +2538,30 @@ int mode() { if (__ctfe) return 1; return 2; }
         expect(second.out).toBe(`${f.value}\n${f.out}`);
     });
 
+    test("outline, references, rename and signature help at every character between two kept compiles", async () => {
+        compile({ "lib.d": LIB, "nv.d": NV }, "nv.d", true);
+        const { global } = await import("./dmd/globals.js");
+        const errors = global.errors;
+        const nv = join(dir, "nv.d");
+        expect(djs.queryDocumentSymbols(nv, NV).result).not.toBeNull();
+        const lines = NV.split("\n");
+        for (let l = 0; l < lines.length; l++) {
+            for (let c = 0; c < lines[l]!.length; c++) {
+                djs.queryReferences(nv, l, c, NV);
+                djs.queryPrepareRename(nv, l, c, NV);
+                djs.queryRename(nv, l, c, NV, "renamed");
+                djs.querySignatureHelp(nv, l, c, NV);
+            }
+        }
+        expect(global.errors).toBe(errors);
+        const second = compile({ "nv.d": `${NV}int more() { return main() + grow(2); }\n` }, "nv.d", true);
+        expect(second.mode).toBe("kept");
+        vi.resetModules();
+        const fresh = await import("./djs.js");
+        const f = quiet(() => fresh.djsMain(["-c", "-o-", "-verrors=0", `-I${dir}`, nv], () => true));
+        expect(second.out).toBe(`${f.value}\n${f.out}`);
+    });
+
     test("expansions and hovers at every character between two kept compiles: the second is fresh", async () => {
         compile({ "xp.d": XP }, "xp.d", true);
         const xp = join(dir, "xp.d");
@@ -1840,5 +2577,32 @@ int mode() { if (__ctfe) return 1; return 2; }
         const fresh = await import("./djs.js");
         const f = quiet(() => fresh.djsMain(["-c", "-o-", "-verrors=0", `-I${dir}`, xp], () => true));
         expect(second.out).toBe(`${f.value}\n${f.out}`);
+    });
+
+    test("hovers and definitions at every character between two kept compiles: the second is fresh", async () => {
+        const { global } = await import("./dmd/globals.js");
+        const cases: [Record<string, string>, string, string][] = [[{ "bp.d": BP }, "bp.d", "S.init.b"],
+            [{ "pa.d": PA, "pb.d": PB, "pu.d": PU }, "pu.d", "use() + B_TWO"], [{ "tp.d": TP }, "tp.d", "use()"]];
+        for (const [files, root, more] of cases) {
+            compile(files, root, true);
+            const errors = global.errors;
+            const file = join(dir, root);
+            const text = files[root]!;
+            const lines = text.split("\n");
+            for (let l = 0; l < lines.length; l++) {
+                for (let c = 0; c < lines[l]!.length; c++) {
+                    djs.queryHover(file, l, c, text);
+                    djs.queryDefinition(file, l, c, text);
+                }
+            }
+            expect(djs.querySemanticTokens(file, text).result).not.toBeNull();
+            expect(global.errors).toBe(errors);
+            const second = compile({ [root]: `${text}long more() { return ${more}; }\n` }, root, true);
+            expect(second.mode).toBe("kept");
+            vi.resetModules();
+            const fresh = await import("./djs.js");
+            const f = quiet(() => fresh.djsMain(["-c", "-o-", "-verrors=0", `-I${dir}`, file], () => true));
+            expect(second.out).toBe(`${f.value}\n${f.out}`);
+        }
     });
 });

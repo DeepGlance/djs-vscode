@@ -281,6 +281,66 @@ describe("parseCommandLine — the switches ldmd2 translates, as ldc2 applies th
     });
 });
 
+// `-mcpu=` through ldmd.cpp:619-634 to the target machine gen/ldctraits.ts models: the CPU name, the feature bits,
+// D_AVX/D_AVX2 (main.cpp:805-808) and LLVM's warnings, against `ldmd2 <flags> -c -o- mcpupin.d` on an Apple M2 host
+// (`-mcpu=native` is `apple-m2` there; on another host the shim refuses it).
+describe("-mcpu= and the target machine (ldmd.cpp:619-634, driver/targetmachine.cpp:441)", () => {
+    const MCPUPIN = `version (X86_64) enum fs = ["sse4.2", "avx", "avx2", "cx16", "avx512f"];
+else enum fs = ["neon", "crc", "i8mm", "sme", "sve"];
+static foreach (f; fs) pragma(msg, f, " ", __traits(targetHasFeature, f));
+pragma(msg, __traits(targetCPU));
+version (D_AVX) pragma(msg, "D_AVX");
+version (D_AVX2) pragma(msg, "D_AVX2");
+`;
+    const X86 = "-mtriple=x86_64-linux-gnu";
+    const notCpu = (c: string) => `'${c}' is not a recognized processor for this target (ignoring processor)\n`;
+    const notFeature = (f: string) => `'${f}' is not a recognized feature for this target (ignoring feature)\n`;
+
+    test.each([
+        [["-mcpu=native"], "neon true\ncrc true\ni8mm true\nsme false\nsve false\napple-m2\n"],
+        [["-mcpu=native", X86], notCpu("apple-m2") + notCpu("apple-m2")
+            + "sse4.2 false\navx false\navx2 false\ncx16 false\navx512f false\napple-m2\n"],
+        [["-mcpu=avx", X86], "sse4.2 true\navx true\navx2 false\ncx16 true\navx512f false\nx86-64\nD_AVX\n"],
+        [["-mcpu=avx2", X86], "sse4.2 true\navx true\navx2 true\ncx16 true\navx512f false\nx86-64\nD_AVX\nD_AVX2\n"],
+        [["-mcpu=x86-64-v4", X86],
+            "sse4.2 true\navx true\navx2 true\ncx16 true\navx512f true\nx86-64-v4\nD_AVX\nD_AVX2\n"],
+        [["-mcpu=apple-m4", "-mcpu=avx2", X86], notCpu("apple-m4") + notCpu("apple-m4")
+            + "sse4.2 true\navx true\navx2 true\ncx16 false\navx512f false\napple-m4\nD_AVX\nD_AVX2\n"],
+        // LDC's `+cx16` for `x86-64` whatever the arch, after the `-mattr` flags
+        [["-mcpu=x86-64", "-mcpu=avx"], notCpu("x86-64") + notFeature("+avx") + notFeature("+cx16") + notCpu("x86-64")
+            + "neon false\ncrc false\ni8mm false\nsme false\nsve false\nx86-64\n"],
+        [["-mcpu=cortex-a76", "-mtriple=aarch64-linux-gnu"],
+            "neon true\ncrc true\ni8mm false\nsme false\nsve false\ncortex-a76\n"],
+        // `baseline` is dropped by ldmd2; an empty `-mcpu=` is the default CPU
+        [["-mcpu=apple-m1", "-mcpu=baseline"], "neon true\ncrc true\ni8mm false\nsme false\nsve false\napple-m1\n"],
+        [["-mcpu=apple-m3", "-mcpu="], "neon true\ncrc false\ni8mm false\nsme false\nsve false\ngeneric\n"],
+    ])("%j", async (flags, stderr) => {
+        const dir = mkdtempSync(join(tmpdir(), "djs-mcpu-"));
+        try {
+            writeFileSync(join(dir, "mcpupin.d"), MCPUPIN);
+            const r = await djs(["-c", "-o-", ...flags, join(dir, "mcpupin.d")]);
+            expect(r.code).toBe(0);
+            expect(r.stdout).toBe("");
+            expect(r.stderr).toBe(stderr);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test.each([
+        // a CPU LLVM knows, with no probed table: ldc2 prints `haswell`, D_AVX and D_AVX2
+        [["-mcpu=haswell", X86], "-mcpu=haswell", "no ldc2-probed feature table for `haswell` on x86_64 (10 §4.2)"],
+        // recognised by LLVM though `-mcpu=help` does not list it: no name outside the tables is assumed unknown
+        [["-mcpu=apple-latest"], "-mcpu=apple-latest",
+            "no ldc2-probed feature table for `apple-latest` on aarch64 (10 §4.2)"],
+        [["-mcpu=help"], "-mcpu=help", "ldc2 prints LLVM's CPU list, which the shim does not reproduce"],
+    ])("%j is refused before the frontend", async (flags, flag, why) => {
+        const r = await djs(["-c", "-o-", ...flags, ...ACCEPT]);
+        expect(r.code).toBe(2);
+        expect(r.stderr).toBe(`djs: unsupported flag \`${flag}\` (${why})\n`);
+    });
+});
+
 // The driver-path cases of dmodule.test.ts `compile()`, through the shim: the same startup sequence, now in
 // src/dmd/main.ts, gives ldc2's output for them.
 describe("the dmodule.test.ts driver cases, through djsMain", () => {

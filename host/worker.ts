@@ -17,7 +17,10 @@
 // copy of the buffer); an inlay-hints request is one `queryInlayHints` call, an inactive-ranges request one
 // `queryInactiveRanges` call, an expansion-sites request one `queryExpansionSites` call, an expansion request one
 // `queryExpansion` call, an AST request one `queryAst` call, an instances request one `queryInstances` call, an imports
-// request one `queryImports` call, a completion request one `queryCompletion` call. A query that throws is answered
+// request one `queryImports` call, a completion request one `queryCompletion` call, a document-symbols request one
+// `queryDocumentSymbols` call, a references request one `queryReferences` call, a rename request one
+// `queryPrepareRename` call (no new name) or one `queryRename` call, a signature-help request one `querySignatureHelp`
+// call. A query that throws is answered
 // with its error as the reason, and the worker serves the next request.
 //
 // CONTRACT WITH THE CALLER (10 §4.7):
@@ -37,8 +40,9 @@ import { isAbsolute } from "node:path";
 import { parentPort } from "node:worker_threads";
 import {
     SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, djsMainKept, queryAst, queryCompletion, queryDefinition,
-    queryExpansion, queryExpansionSites, queryHover, queryImports, queryInactiveRanges, queryInlayHints,
-    queryInstances, querySemanticTokens, type KeptCompile,
+    queryDocumentSymbols, queryExpansion, queryExpansionSites, queryHover, queryImports, queryInactiveRanges,
+    queryInlayHints, queryInstances, queryPrepareRename, queryReferences, queryRename, querySemanticTokens,
+    querySignatureHelp, type KeptCompile,
 } from "../src/djs.js";
 import { setDiagnosticHandler, unescapeBackticks } from "../src/dmd/errors.js";
 import { OutBuffer } from "../src/dmd/common/outbuffer.js";
@@ -49,9 +53,11 @@ import { packAst } from "./ast.js";
 import { tokenRange } from "./position.js";
 import type {
     AstReply, AstRequest, CompileReply, CompileRequest, CompletionReply, CompletionRequest, DefinitionReply,
-    Diagnostic, DiagnosticLine, ExpansionReply, ExpansionRequest, ExpansionSitesReply, ExpansionSitesRequest,
-    HoverReply, ImportsReply, ImportsRequest, InactiveRangesReply, InactiveRangesRequest, InlayHintsReply,
-    InlayHintsRequest, InstancesReply, InstancesRequest, Position, QueryRequest, Request, ReadyMessage,
+    Diagnostic, DiagnosticLine, DocumentSymbolsReply, DocumentSymbolsRequest, ExpansionReply, ExpansionRequest,
+    ExpansionSitesReply, ExpansionSitesRequest, HoverReply, ImportsReply, ImportsRequest, InactiveRangesReply,
+    InactiveRangesRequest, InlayHintsReply, InlayHintsRequest, InstancesReply, InstancesRequest, Position, QueryRequest,
+    ReferencesReply, ReferencesRequest, RenameReply, RenameRequest, Request, ReadyMessage, SignatureHelpReply,
+    SignatureHelpRequest,
     SemanticTokensReply, SemanticTokensRequest, Severity,
 } from "./protocol.js";
 
@@ -366,6 +372,86 @@ function completion(req: CompletionRequest): CompletionReply {
     }
 }
 
+/** The outline of the last compile's `req.file`; the boundary is `validFile`, as for the tokens. */
+function documentSymbols(req: DocumentSymbolsRequest): DocumentSymbolsReply {
+    const t0 = performance.now();
+    const reply = (symbols: DocumentSymbolsReply["symbols"], stale: boolean, reason: string): DocumentSymbolsReply =>
+        ({ kind: "documentSymbols", id: req.id, symbols, stale, reason, ms: performance.now() - t0 });
+    if (!validFile(req))
+        return reply(null, false, "invalid request: documentSymbols needs an absolute file and the document's text");
+    try {
+        const a = queryDocumentSymbols(req.file, req.text);
+        return a.result === null ? reply(null, a.stale, a.reason) : reply(a.result.symbols, false, "");
+    } catch (e) {
+        return reply(null, false, internalError(e));
+    }
+}
+
+/**
+ * The references of the symbol at `req`'s position of `req.file`, from the last compile. The boundary: `validFile` and
+ * a position (`validPosition`), else the reason `invalid request: ...`. An error the query throws becomes the reason.
+ */
+function references(req: ReferencesRequest): ReferencesReply {
+    const t0 = performance.now();
+    const reply = (result: ReferencesReply["result"], stale: boolean, reason: string): ReferencesReply =>
+        ({ kind: "references", id: req.id, result, stale, reason, ms: performance.now() - t0 });
+    if (!validFile(req) || !validPosition({ line: req.line, character: req.character }))
+        return reply(null, false,
+            "invalid request: references needs an absolute file, the document's text, a position");
+    try {
+        const a = queryReferences(req.file, req.line, req.character, req.text);
+        return a.result === null ? reply(null, a.stale, a.reason) : reply(a.result, false, "");
+    } catch (e) {
+        return reply(null, false, internalError(e));
+    }
+}
+
+/**
+ * Whether the symbol at `req`'s position can be renamed, or (with `req.newName`) the edits renaming it, from the last
+ * compile. The boundary: `validFile`, a position, `newName` absent or a string, else the reason `invalid request: ...`.
+ * An error the query throws becomes the reason.
+ */
+function rename(req: RenameRequest): RenameReply {
+    const t0 = performance.now();
+    const reply = (result: RenameReply["result"], stale: boolean, reason: string): RenameReply =>
+        ({ kind: "rename", id: req.id, result, stale, reason, ms: performance.now() - t0 });
+    if (!validFile(req) || !validPosition({ line: req.line, character: req.character })
+        || (req.newName !== undefined && typeof req.newName !== "string"))
+        return reply(null, false, "invalid request: rename needs an absolute file, the document's text, a position");
+    try {
+        if (req.newName === undefined) {
+            const a = queryPrepareRename(req.file, req.line, req.character, req.text);
+            return a.result === null ? reply(null, a.stale, a.reason) : reply({ ...a.result, edits: [] }, false, "");
+        }
+        const a = queryRename(req.file, req.line, req.character, req.text, req.newName);
+        const r = a.result;
+        const at = { line: req.line, character: req.character };
+        return r === null ? reply(null, a.stale, a.reason)
+            : reply({ range: { start: at, end: at }, placeholder: r.newName, edits: r.edits }, false, "");
+    } catch (e) {
+        return reply(null, false, internalError(e));
+    }
+}
+
+/**
+ * The signatures of the call around `req`'s position of `req.file`, from the last compile. The boundary: `validFile`
+ * and a position, else the reason `invalid request: ...`. An error the query throws becomes the reason.
+ */
+function signatureHelp(req: SignatureHelpRequest): SignatureHelpReply {
+    const t0 = performance.now();
+    const reply = (result: SignatureHelpReply["result"], stale: boolean, reason: string): SignatureHelpReply =>
+        ({ kind: "signatureHelp", id: req.id, result, stale, reason, ms: performance.now() - t0 });
+    if (!validFile(req) || !validPosition({ line: req.line, character: req.character }))
+        return reply(null, false,
+            "invalid request: signatureHelp needs an absolute file, the document's text, a position");
+    try {
+        const a = querySignatureHelp(req.file, req.line, req.character, req.text);
+        return a.result === null ? reply(null, a.stale, a.reason) : reply(a.result, false, "");
+    } catch (e) {
+        return reply(null, false, internalError(e));
+    }
+}
+
 port.on("message", (req: Request) => {
     switch (req.kind) {
         case "compile": port.postMessage(compile(req)); break;
@@ -378,6 +464,10 @@ port.on("message", (req: Request) => {
         case "instances": port.postMessage(instances(req)); break;
         case "imports": port.postMessage(imports(req)); break;
         case "completion": port.postMessage(completion(req)); break;
+        case "documentSymbols": port.postMessage(documentSymbols(req)); break;
+        case "references": port.postMessage(references(req)); break;
+        case "rename": port.postMessage(rename(req)); break;
+        case "signatureHelp": port.postMessage(signatureHelp(req)); break;
         default: port.postMessage(query(req));
     }
 });

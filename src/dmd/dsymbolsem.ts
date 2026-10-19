@@ -26,7 +26,7 @@
 import { Visitor } from "./visitor/index.js";
 import {
     K, KeepUnit, keepDeferred, keepDeferredPass, keepForeignErrors, keepImportedFrom, keepMark, keepPkgMod, keepReq,
-    keepRun, keepSearch, keepSized, keepTree, keepUnwind,
+    keepRetried, keepRetry, keepRun, keepSearch, keepSized, keepTree, keepUnwind,
 } from "../keep.js";
 import { ClassKind } from "./aggregate.js"; // value: interfaceNewScope compares classKind to cpp/objc
 import type { AggregateDeclaration } from "./aggregate.js";
@@ -988,7 +988,7 @@ let runDeferredSemanticNested = 0;
 export function runDeferredSemantic(): void {
     if (runDeferredSemanticNested)
         return;
-    if (K.on) keepDeferred();   // the kept-module engine: the running unit retries the deferred symbols
+    const retry = K.on ? keepRetry() : null;   // the kept-module engine: the running unit retries the deferred symbols
     //if (Module.deferred.length) printf("+Module::runDeferredSemantic(), len = %ld\n", deferred.length);
     runDeferredSemanticNested++;
 
@@ -1024,6 +1024,8 @@ export function runDeferredSemantic(): void {
     } finally {
         runDeferredSemanticNested--;
     }
+    if (retry !== null)
+        keepRetried(retry);     // the kept-module engine: whether the retry did any work
     //printf("-Module::runDeferredSemantic(), len = %ld\n", deferred.length);
 }
 

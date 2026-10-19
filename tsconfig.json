@@ -16,6 +16,7 @@
     "skipLibCheck": true,
 
     "declaration": false,
+    "removeComments": true,
     "noEmit": true,
     "types": ["node"],
     "rootDir": "src",

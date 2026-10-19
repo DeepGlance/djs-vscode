@@ -301,8 +301,8 @@ function tryMainBody(params: Param, files: DArray<DString>, libmodules: DString[
 
     if (params.mixinOut.doOutput) {
         params.mixinOut.buffer = new OutBuffer();
-        // atexit(&flushMixins) — see comment for flushMixins (mars.d:482): the fatal path; src/djs.ts
-        // refuses `-mixin`, so no run of the shim sets up this buffer.
+        // atexit(&flushMixins) is for the exits that skip scope(exit) (mars.d:475-479: fatal() calling exit).
+        // djs's fatal() throws FatalError or returns (10 §4.1): both leave through the `finally` below.
     }
     try {   // scope(exit) flushMixins();
         buildImportPath(params.imppath, global.path, global.importPaths);

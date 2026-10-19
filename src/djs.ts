@@ -12,8 +12,9 @@
 //
 // THE FLAG CONTRACT (10 §4.2). `parseCommandLine` accepts the DMD spellings ldmd2 accepts, one at a time, and
 // sets what ldc2 sets for the ldc2 switch ldmd2 translates it to; each arm cites both. A switch that is not in
-// the table, or whose effect the shim does not reproduce (an output file other than the frontend's Ddoc, JSON
-// and `-vcg-ast` files, codegen, linking, another target), STOPS the run before the frontend starts: `djs:
+// the table, or whose effect the shim does not reproduce (an output file other than the frontend's Ddoc, JSON,
+// `-vcg-ast`, `.di` header, mixin and module-dependency files, codegen, linking, another target), STOPS the run
+// before the frontend starts: `djs:
 // unsupported flag` on stderr, exit status 2. Nothing is silently ignored except switches that cannot change a
 // diagnostic, each marked where it is accepted.
 //
@@ -32,11 +33,12 @@
 // `ulimit -s` so V8 reports the overflow instead of the OS killing the process. Imported as a module (the
 // load-order suites, the tests) it does nothing until `djsMain` is called.
 
+import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
-import { CHECKACTION, CHECKENABLE } from "./dmd/astenums.js";
+import { CHECKACTION, CHECKENABLE, Edition } from "./dmd/astenums.js";
 import { Compiler, includeModulePatterns, resetCompilerState, setIncludeImports } from "./dmd/compiler.js";
 import { DebugCondition, VersionCondition } from "./dmd/cond.js";
 import {
@@ -61,7 +63,9 @@ import { keepDropCtfeGlobals, resetCtfeGlobals } from "./dmd/dinterpret.js";
 import { Module, getFilename } from "./dmd/dmodule.js";
 import { StructDeclaration } from "./dmd/dstruct.js";
 import { Dsymbol, PASS } from "./dmd/dsymbol.js";
-import { addDeferredSemantic2, addDeferredSemantic3, resetDsymbolsemState } from "./dmd/dsymbolsem.js";
+import {
+    addDeferredSemantic2, addDeferredSemantic3, resetDsymbolsemState, runDeferredSemantic,
+} from "./dmd/dsymbolsem.js";
 import {
     TemplateAliasParameter, TemplateStats, TemplateTypeParameter, TemplateValueParameter,
 } from "./dmd/dtemplate.js";
@@ -95,6 +99,8 @@ import { parsePreviewOption, parseRevertOption, parseTransitionOption } from "./
 // after mars.js, which already loads json.js inside the frontend graph: named here, json.js would not be the
 // entry of that graph (01 §4.8)
 import { tryParseJsonField } from "./dmd/json.js";
+import { parseDigits } from "./dmd/utils.js";
+import { OutBuffer } from "./dmd/common/outbuffer.js";
 import { Array as DArray } from "./dmd/root/array.js";
 import { initTokens } from "./dmd/tokens.js";
 import { type KeptCompile, dropKeptState as dropKept, keepBind, keepCompile } from "./keep.js";
@@ -103,6 +109,8 @@ import { ds, dsUtf8 } from "./dstring.js";
 import type { DString } from "./dstring.js";
 // after the frontend graph (main.js above); cpreprocessor.js imports only leaf modules of it
 import { configureCPreprocessor, preprocessForKeep, runCPreprocessor } from "./driver/cpreprocessor.js";
+// after the frontend graph (main.js above), inside which hooks.js has already loaded it
+import { createTargetMachine, isModelledCPU, traitsTargetHasFeature } from "./gen/ldctraits.js";
 
 /**
  * The LDC 1.43.0 import tree bundled with djs (druntime, Phobos, LDC's ldc/ and etc/ modules, object.d, ImportC's
@@ -131,8 +139,8 @@ const LLVM_VERSION_MAJOR = "22";
  * ldc2 option). ldmd2-only spellings (`version`, `debug`, `inline`, ...) are not: `--version` is LLVM's own option.
  */
 const LDC2_DOUBLE_DASH: ReadonlySet<string> = new Set([
-    "checkaction", "d-debug", "d-version", "gcc", "i", "preview", "release", "revert", "transition", "unittest",
-    "vcolumns",
+    "checkaction", "d-debug", "d-version", "deps", "gcc", "i", "preview", "release", "revert", "transition",
+    "unittest", "vcolumns",
 ]);
 
 /** The exit status of a run the shim refused (an unsupported switch); distinct from ldc2's 0 and 1. */
@@ -152,6 +160,7 @@ class UnsupportedFlag extends Error {
 let compileOnly = false;          // cl_options.cpp `compileOnly` ("c")
 let dontWriteObj = false;         // cl_options.cpp `dontWriteObj` ("o-")
 let fNoExceptions = false;        // cl_options.cpp `fNoExceptions` ("fno-exceptions"; ldmd `-nothrow`)
+let noAsm = false;                // cl_options.cpp:254 `noAsm` ("noasm")
 let optimize = false;             // driver/cl_options.cpp `-O*`; read by `isOptimizationEnabled()`
 let objectFile: string | null = null;   // "of", null until it occurs (`getNumOccurrences`)
 let objectDir: string | null = null;    // "od"
@@ -173,13 +182,21 @@ let ddocDir: string | null = null;      // "Dd", null until it occurs
 let ddocFile: string | null = null;     // "Df"
 let jsonFile: string | null = null;     // "Xf"
 let jsonFields: string[] = [];          // "Xi", one entry per occurrence
+let hdrDir: string | null = null;       // cl_options.cpp:324 "Hd"
+let hdrFile: string | null = null;      // cl_options.cpp:328 "Hf"
+let mixinFile: string | null = null;    // cl_options.cpp:375 "mixin"
+let moduleDeps: string | null = null;   // cl_options.cpp:452 "deps", ValueOptional: "" for a value-less occurrence
 let cppSwitches: string[] = [];         // cl_options.cpp:449 "P", one entry per occurrence
 let m64bits = false;                    // main.cpp `m64bits` ("m64"), its occurrence
 let mTargetTriple: Triple | null = null; // cl_options.cpp:468 `mTargetTriple` ("mtriple"), parsed; null: empty
 let gcc = "";                           // tool.cpp:41 `gcc` ("gcc"), the last occurrence; "" when absent
+let mCPU = "";                          // LLVM codegen's `MCPU` ("mcpu"), the last occurrence; "" when absent
+let mCPUFlag = "";                      // the spelling of that occurrence, for a refusal
+let mAttrs: string[] = [];              // LLVM codegen's `MAttrs` ("mattr", a cl::list), one entry per occurrence
+let cpuStr = "";                        // `codegen::getCPUStr()`: `mCPU` with `native` resolved
 
 function resetDriverState(): void {
-    compileOnly = dontWriteObj = fNoExceptions = optimize = false;
+    compileOnly = dontWriteObj = fNoExceptions = noAsm = optimize = false;
     objectFile = objectDir = null;
     printErrorContext = useDIP1000Legacy = null;
     useDIP25Legacy = false;
@@ -189,10 +206,13 @@ function resetDriverState(): void {
     hasIncludeSwitch = hdrKeepAllBodies = false;
     ddocDir = ddocFile = jsonFile = null;
     jsonFields = [];
+    hdrDir = hdrFile = mixinFile = moduleDeps = null;
     cppSwitches = [];
     gcc = "";
     m64bits = false;
     mTargetTriple = null;
+    mCPU = mCPUFlag = cpuStr = "";
+    mAttrs = [];
 }
 
 /**
@@ -268,15 +288,17 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
             a = a.slice(1);
         }
         // Switches whose effect the frontend path never sees: accepted, nothing set.
-        if (a === "-fPIC" || a === "-lowmem" || a === "-quiet" || a === "-mcpu=baseline"
+        if (a === "-fPIC" || a === "-lowmem" || a === "-quiet"
             || a.startsWith("-L") || a.startsWith("-defaultlib=") || a.startsWith("-debuglib=")
             || a === "-disable-linker-strip-dead" || a === "-g" || a === "-gc" || a === "-gf" || a === "-gs"
-            || a === "-color=off" || a === "-op") {
+            || a === "-color=off" || a === "-op" || a === "-nogc") {
             // -fPIC: ldmd.cpp `-relocation-model=pic`, already the model of every supported triple (`D_PIC`);
             // -lowmem: main.cpp:189, GC mode only;
-            // -quiet: ldmd.cpp, nothing; -mcpu=baseline: ldmd.cpp, nothing; -L/-defaultlib/-debuglib/
+            // -quiet: ldmd.cpp, nothing; -L/-defaultlib/-debuglib/
             // -disable-linker-strip-dead: link only; -g/-gc/-gf/-gs: debug info and frame pointers (codegen);
-            // -color=off: ldmd.cpp `-disable-color`, the default for a pipe; -op: object file paths.
+            // -color=off: ldmd.cpp `-disable-color`, the default for a pipe; -op: object file paths;
+            // -nogc: gen/runtime.cpp:45, checked when code generation asks for a runtime function (:61), which no
+            // run of the shim reaches (main.ts stops at `codegenModules`).
             if (a === "-op")
                 P.preservePaths = true;   // gen/modules.cpp:62 "op"
             else if (a === "-g" || a === "-gf")
@@ -298,6 +320,22 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
                     "the shim models aarch64-linux-gnu, x86_64-linux-gnu and the arm64 Mac only (10 §4.8)");
             }
             mTargetTriple = triple;
+            continue;
+        }
+        // ldmd.cpp:619-634 `-mcpu=`: `?`, `h` and `help` become ldc2's `-mcpu=help`, which prints LLVM's CPU list;
+        // `baseline` is dropped; `avx` and `avx2` become `-mattr=+avx` / `-mattr=+avx2`; `native` and any other
+        // value (the Lerror arm, :760) pass through as ldc2's `-mcpu=<v>`. Which CPUs the model covers is checked
+        // after the loop, once the triple is known.
+        if (a.startsWith("-mcpu=")) {
+            const v = a.slice(6);
+            if (v === "?" || v === "h" || v === "help")
+                unsupported(a, "ldc2 prints LLVM's CPU list, which the shim does not reproduce");
+            if (v === "avx" || v === "avx2") {
+                mAttrs.push(`+${v}`);
+            } else if (v !== "baseline") {
+                mCPU = v;
+                mCPUFlag = a;
+            }
             continue;
         }
         if (a.startsWith("-conf=")) {   // main.cpp:210 `tryGetExplicitConfFile`
@@ -324,6 +362,23 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
         // ldc2 rejects `-Xi<field>` as an unknown argument, which falls to the end of the table here.
         if (a.startsWith("-Xi=")) { jsonFields.push(a.slice(4)); continue; }
         if (a === "-Xi") { jsonFields.push(prefixValue("Xi")); continue; }
+        // ldmd.cpp:661-663 passes -H, -Hd and -Hf through unchanged. cl_options.cpp:321 `doHdrGen` ("H") is a bool
+        // bound to `dihdr.doOutput`; :324 "Hd" and :328 "Hf" are cl::Prefix strings, the last occurrence winning,
+        // which main.cpp:366-369 reads below. :333 "Hkeep-all-bodies" is what ldmd's `-inline` sets. The C++ header
+        // switches (-HC, -HCd, -HCf: dtoh.d) are not in the table.
+        if (a === "-H") { P.dihdr.doOutput = true; continue; }
+        if (a.startsWith("-Hd")) { hdrDir = prefixValue("Hd"); continue; }
+        if (a.startsWith("-Hf")) { hdrFile = prefixValue("Hf"); continue; }
+        if (a === "-Hkeep-all-bodies") { hdrKeepAllBodies = true; continue; }
+        // cl_options.cpp:375 `mixinFile` ("mixin"), a cl::opt<std::string> ldmd2 passes through (ldmd.cpp:575):
+        // `-mixin=<file>` or `-mixin <file>`, the last occurrence winning; main.cpp:376 reads it below.
+        if (a === "-mixin" || a.startsWith("-mixin=")) {
+            mixinFile = a === "-mixin" ? prefixValue("mixin") : a.slice(7);
+            continue;
+        }
+        // cl_options.cpp:452 `moduleDeps` ("deps"), cl::ValueOptional, passed through by ldmd2 (ldmd.cpp:746):
+        // `-deps` (to stdout) or `-deps=<file>`, never the next argument; main.cpp:379 reads it below.
+        if (a === "-deps" || a.startsWith("-deps=")) { moduleDeps = a.slice(6); continue; }
         if (a.startsWith("-I")) {   // main.cpp:91 ImportPathsAdapter("I", params.imppath, false)
             const v = prefixValue("I");
             if (!v)
@@ -369,6 +424,14 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
                     P.debugEnabled = true;
                 else
                     debugArgs.push(d);
+            continue;
+        }
+        // main.cpp:107-112 `editions`, a cl::list whose EditionsAdapter (cl_helpers.cpp:78) hands each value to
+        // ldcbindings.d:87 `parseEditionOption`; ldmd.cpp:525 turns the DMD spelling `-edition` into `-edition=`.
+        if (a === "-edition" || a.startsWith("-edition=")) {
+            const v = a === "-edition" ? "" : a.slice(9);
+            if (!parseEditionOption(v))
+                error(Loc.initial, ds("Invalid argument for '-edition': %s"), dsUtf8(v));
             continue;
         }
         if (a.startsWith("-transition=")) { transitions.push(...a.slice(12).split(",")); continue; }
@@ -430,6 +493,7 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
         if (a === "-ignore") { P.ignoreUnsupportedPragmas = true; continue; }
         if (a === "-shared") { P.dll = true; continue; }
         if (a === "-nothrow") { fNoExceptions = true; continue; }   // ldmd.cpp `-fno-exceptions`
+        if (a === "-noasm") { noAsm = true; continue; }   // ldmd2 passes it through (ldmd.cpp:760)
         // gen/optimizer.cpp:76 `optimizeLevel`, the last occurrence wins; :177 `isOptimizationEnabled()` is
         // `optimizeLevel != 0`, and only `-O0` is level 0.
         if (a === "-O" || /^-O[0-5sz]$/.test(a)) { optimize = a !== "-O0"; continue; }
@@ -487,6 +551,23 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
         unsupported(a, "not in the shim's flag table (10 §4.2)");
     }
 
+    // cl_options-llvm.cpp:65 `getCPUStr()`, LLVM's `codegen::getCPUStr()`: `native` is the host's CPU name. Checked
+    // here, before anything is printed, against the CPUs gen/ldctraits.ts has ldc2's tables for (10 §4.2). Without a
+    // triple (an unsupported host and no `-mtriple`) the check is left out: `cppmain` stops the run.
+    cpuStr = mCPU;
+    if (mCPU === "native") {
+        const host = getHostCPUName();
+        if (host === null) {
+            unsupported(mCPUFlag, "the host's CPU is not the one ldc2 was probed on (the Apple M2, apple-m2; "
+                + "10 §4.2)");
+        }
+        cpuStr = host!;
+    }
+    const tripleForCPU = mTargetTriple ?? HOST_TRIPLE;
+    if (tripleForCPU !== null && !isModelledCPU(tripleForCPU, cpuStr)) {
+        unsupported(mCPUFlag, `no ldc2-probed feature table for \`${cpuStr}\` on ${tripleForCPU.arch} (10 §4.2)`);
+    }
+
     // main.cpp:274-282, 331-342 — the config file, and what `-v` prints about the run.
     if (explicitConf === null) {
         if (ldcRoot !== null) {
@@ -522,8 +603,7 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
     // Negated options (main.cpp:344)
     P.link = !compileOnly;
     P.obj = !dontWriteObj;
-    // `useInlineAsm = !noAsm` (`-noasm` is not in the table): the default.
-    P.useInlineAsm = true;
+    P.useInlineAsm = !noAsm;
     P.useExceptions = !fNoExceptions;
     // `useModuleInfo = !fNoModuleInfo; useTypeInfo = !fNoRTTI;` — neither switch is in the table.
     P.useModuleInfo = true;
@@ -540,8 +620,21 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
     if ((P.json.name?.length ?? 0) !== 0 || jsonFields.length !== 0) {
         P.json.doOutput = true;
     }
-    // main.cpp:366-399 — .di / C++ header / mixin / deps outputs: every switch that sets them is refused above,
-    // so they keep their defaults.
+    P.dihdr.dir = fromPathString("Hd", hdrDir);     // main.cpp:366
+    P.dihdr.name = fromPathString("Hf", hdrFile);
+    P.dihdr.doOutput ||= (P.dihdr.dir?.length ?? 0) !== 0 || (P.dihdr.name?.length ?? 0) !== 0;
+    // main.cpp:371-374 `cxxhdr`: -HC, -HCd and -HCf are refused above, so it keeps its default.
+
+    P.mixinOut.name = fromPathString("mixin", mixinFile);   // main.cpp:376
+    P.mixinOut.doOutput ||= (P.mixinOut.name?.length ?? 0) !== 0;
+
+    if (moduleDeps !== null) {   // main.cpp:379 `moduleDeps.getNumOccurrences() != 0`
+        P.moduleDeps.doOutput = true;
+        P.moduleDeps.buffer = new OutBuffer();   // `createOutBuffer()`
+        if (moduleDeps !== "")
+            P.moduleDeps.name = dsUtf8(moduleDeps);   // `opts::dupPathString`
+    }
+    // main.cpp:386-390 `makeDeps`: -makedeps is refused above, so it keeps its default.
 
     for (const field of jsonFields) {   // main.cpp:403
         const flag = tryParseJsonField(dsUtf8(field + "\0"));   // `field.c_str()`: json.d reads a C string
@@ -613,6 +706,48 @@ function parseCommandLine(args: readonly string[], files: DArray<DString>): void
 
     P.dihdr.fullOutput = hdrKeepAllBodies;   // main.cpp:569
     // main.cpp:570 `disableRedZone` is codegen state.
+}
+
+/**
+ * LLVM's `sys::getHostCPUName()` (llvm/lib/TargetParser/Host.cpp), for `-mcpu=native`. On an arm64 Mac LLVM maps
+ * `sysctl hw.cpufamily` to a CPU name, and so does the shim, for the one family probed with ldc2 on this machine:
+ * CPUFAMILY_ARM_BLIZZARD_AVALANCHE (0xda33d83d in the SDK's <mach/machine.h>, the M2) is `apple-m2`
+ * (`ldc2 --version`: `Host CPU: apple-m2`). Returns null for any other family and on any other host (on Linux LLVM
+ * reads /proc/cpuinfo): their names are not verified, so the driver refuses `-mcpu=native` there.
+ * `codegen::getFeaturesStr()` also adds `sys::getHostCPUFeatures()` for `native`: none on this M2 (probed: under
+ * x86_64-linux-gnu, where every AArch64 feature name would warn, `-mcpu=native` warns about the CPU name only, and on
+ * AArch64 it answers every feature as `-mcpu=apple-m2` does), so the shim adds none.
+ * Cost: one `sysctl` process.
+ */
+function getHostCPUName(): string | null {
+    if (process.platform !== "darwin" || process.arch !== "arm64")
+        return null;
+    const family = execFileSync("/usr/sbin/sysctl", ["-n", "hw.cpufamily"], { encoding: "utf8" });
+    return Number.parseInt(family, 10) >>> 0 === 0xda33d83d ? "apple-m2" : null;   // printed as a signed int
+}
+
+/**
+ * ldcbindings.d:87 `parseEditionOption`: an empty value is `Edition.min`, `NNNN` the edition of every module, and
+ * `NNNN<filename>` an entry of `editionFiles` (which the frontend does not read). False for anything else.
+ */
+function parseEditionOption(str: string): boolean {
+    const s = dsUtf8(str);
+    if (s.length === 0) {
+        global.params.edition = Edition.v2023;   // `Edition.min`
+        return true;
+    }
+    if (s.length >= 4) {
+        const box = { value: 0 as number | bigint };
+        // `parseDigits!Edition(edition, str[0 .. 4], Edition.max) && edition >= Edition.min`
+        if (parseDigits(box, s.subarray(0, 4), "ushort", BigInt(Edition.v2025)) && box.value >= Edition.v2023) {
+            if (s.length === 4)
+                global.params.edition = Number(box.value) as Edition;
+            else
+                global.params.editionFiles.set(s.subarray(4), Number(box.value) as Edition);
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -748,8 +883,8 @@ export function registerPredefinedVersions(): void {
  * driver/main.cpp:645 `registerPredefinedTargetVersions`, over the triples target.ts models (10 §4.8): the arms of
  * other archs and OSes are dead. Inputs beyond the triple: the float ABI, `Hard` on aarch64 and x86_64 with no
  * `-float-abi` switch (driver/targetmachine.cpp:584-587); the data layout, little endian with 64-bit pointers on
- * every supported triple; the relocation model, PIC on all three (ldc2 -v prints `D_PIC`); the default CPUs'
- * features, without `avx` and `avx2` on x86-64 (src/gen/ldctraits.ts). ldc2 -v prints exactly these sequences.
+ * every supported triple; the relocation model, PIC on all three (ldc2 -v prints `D_PIC`); on x86_64 the target
+ * machine's `avx` and `avx2` (src/gen/ldctraits.ts, `createTargetMachine`). ldc2 -v prints exactly these sequences.
  */
 function registerPredefinedTargetVersions(add: (s: string) => void): void {
     const triple = global.params.targetTriple ?? hostTriple();
@@ -779,7 +914,12 @@ function registerPredefinedTargetVersions(add: (s: string) => void): void {
 
     add("D_PIC");    // main.cpp:796-798
 
-    // main.cpp:800-809 — x86: `D_AVX`/`D_AVX2` only if the CPU has them; the default `x86-64` has neither.
+    if (triple.arch === "x86_64") {   // main.cpp:800-809; no `D_SIMD` (:801-804, LDC lacks DMD's core.simd interface)
+        if (traitsTargetHasFeature(ds("avx")))
+            add("D_AVX");
+        if (traitsTargetHasFeature(ds("avx2")))
+            add("D_AVX2");
+    }
 
     // parse the OS out of the target triple
     if (triple.isOSLinux()) {   // main.cpp:834-855, the glibc arm: not Android, not musl, not uClibc
@@ -829,7 +969,7 @@ function cppmain(args: readonly string[]): number {
     }
 
     // main.cpp:1203-1240 — the target machine. `-m32` and `-march` are refused (not in the table), so `bitness`
-    // and `arch` are their defaults; relocation model, CPU and features are the triple's defaults.
+    // and `arch` are their defaults, and so is the relocation model.
     if (m64bits && mTargetTriple !== null) {
         error(Loc.initial, ds("-m32 and -m64 switches cannot be used together with -march and -mtriple switches"));
     }
@@ -843,6 +983,10 @@ function cppmain(args: readonly string[]): number {
     }
     // main.cpp:1238-1239 — `global.params.targetTriple = new llvm::Triple(gTargetMachine->getTargetTriple());`
     global.params.targetTriple = mTargetTriple ?? hostTriple();
+    // main.cpp:1229 `createTargetMachine(mTargetTriple, arch, opts::getCPUStr(), opts::getFeaturesStr(), ...)`, after
+    // the triple here because the port reads the triple from `global.params`; nothing prints in between.
+    // `getFeaturesStr()` is the host's features for `native` (none, `getHostCPUName`), then each `-mattr`.
+    createTargetMachine(cpuStr, mAttrs);
 
     // main.cpp:1248-1263 — not Windows:
     global.params.dllexport = false;
@@ -868,9 +1012,10 @@ function cppmain(args: readonly string[]): number {
  * module; public statics are reset here. dmd/timetrace.d:50 `deinitializeTimeTrace` has no call: timetrace is
  * dropped from the port.
  * Left to the code that refills them on every call: the identifier table (`initTokens`), the Loc file table
- * (`Loc._init` in `mars_tryMain`), and the C preprocessor's switches and tool caches (`configureCPreprocessor` in
- * `cppmain`). What stays across calls holds no compile's state: immutable tables, the registration slots, scratch
- * buffers each use clears.
+ * (`Loc._init` in `mars_tryMain`), the C preprocessor's switches and tool caches (`configureCPreprocessor` in
+ * `cppmain`), and the target machine the LDC traits read (gen/ldctraits.ts `createTargetMachine` in `cppmain`).
+ * What stays across calls holds no compile's state: immutable tables, the registration slots, scratch buffers each
+ * use clears.
  * Called at the start of every `djsMain`, the first included: on a fresh process every reset below writes the
  * slot's load-time value, or one the inits of `mars_tryMain` overwrite before any read (`Type.stringtable`), so
  * one unconditional call needs no first-call flag (which would be state too).
@@ -951,6 +1096,7 @@ keepBind({
         return found === null ? null : new TextDecoder().decode(found);
     },
     addDeferred: (s, pass) => (pass === 2 ? addDeferredSemantic2 : addDeferredSemantic3)(s),
+    runDeferredSemantic,
     checkCompiledImport: (m) => {
         // dmd/dmodule.d:783-787, the parse's `checkCompiledImport`: under `-i`, `Compiler.onImport` pushes the module
         // on `compiledImports` and it becomes a root
@@ -1108,13 +1254,18 @@ function sourceTexts(options: DjsOptions): ReadonlyMap<string, Uint8Array> | nul
 
 export {
     type AstAnswer, type AstEntry, type AstResult, type CompletionAnswer, type CompletionItem, type CompletionKind,
-    type CompletionResult, type DeclarationSite, type DefinitionAnswer, type DefinitionResult, type ExpansionAnswer,
+    type CompletionResult, type DeclarationSite, type DefinitionAnswer, type DefinitionResult, type DocumentSymbol,
+    type DocumentSymbolsAnswer, type DocumentSymbolsResult, type ExpansionAnswer, type PrepareRenameAnswer,
+    type PrepareRenameResult, type ReferenceSite, type ReferencesAnswer, type ReferencesResult, type RenameAnswer,
+    type RenameResult, type SignatureHelpAnswer, type SignatureHelpResult, type SignatureInformation,
     type ExpansionKind, type ExpansionResult, type ExpansionSite, type ExpansionSitesAnswer, type ExpansionSitesResult,
     type HoverAnswer, type HoverResult, type ImportModule, type ImportsAnswer, type ImportsResult,
     type InactiveRangesAnswer, type InactiveRangesResult, type InlayHint, type InlayHintsAnswer, type InlayHintsResult,
     type InstanceSite, type InstancesAnswer, type InstancesResult, type QueryMiss, type QueryPosition, type QueryRange,
-    type SemanticTokensAnswer, type SemanticTokensResult, type TemplateInstances, SEMANTIC_TOKEN_MODIFIERS,
-    SEMANTIC_TOKEN_TYPES, STALE_REASON, queryAst, queryCompletion, queryDefinition, queryExpansion, queryExpansionSites,
+    type SemanticTokensAnswer, type SemanticTokensResult, type SymbolKindName, type TemplateInstances,
+    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, STALE_REASON, queryAst, queryCompletion, queryDefinition,
+    queryDocumentSymbols, queryExpansion, queryExpansionSites, queryPrepareRename, queryReferences, queryRename,
+    querySignatureHelp,
     queryHover, queryImports, queryInactiveRanges, queryInlayHints, queryInstances, querySemanticTokens,
 } from "./query.js";
 

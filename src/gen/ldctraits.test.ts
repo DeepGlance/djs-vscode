@@ -2,9 +2,10 @@
 //
 // gen/ldctraits.d has no `unittest` block (10 §1.6b). The two LDC traits are pinned end to end, through
 // `semanticTraits` -> `semanticTraitsHook` -> `semanticTraitsLDC`, against ldc2 1.43.0 on arm64-apple-darwin
-// (`ldc2 -c -o- <file>`, no `-mcpu`/`-mattr`), byte for byte, the probe output quoted at each pin. The
-// feature pins cover all 8 features the default CPU enables (the whole `DEFAULT_FEATURE_BITS` table), a
-// sample of recognised-but-disabled ones, and the unrecognised spellings that make LLVM warn on stderr.
+// (`ldc2 -c -o- <file>`, no `-mcpu`/`-mattr` unless named), byte for byte, the probe output quoted at each pin. The
+// feature pins cover all 8 features the default CPU enables (the whole `generic` table), a sample of
+// recognised-but-disabled ones, and the unrecognised spellings that make LLVM warn on stderr. `-mcpu=` through the
+// driver is pinned in src/djs.test.ts.
 import { initSemaHarness } from "../sema-harness.js"; // imports ./dmd/parse.js first: the module-graph root (10 §1.5)
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Parser } from "../dmd/parse.js";
@@ -15,6 +16,7 @@ import { setDiagnosticHandler } from "../dmd/errors.js";
 import { DiagnosticReporting, global } from "../dmd/globals.js";
 import { dmdformat } from "../dmd/root/dmdformat.js";
 import { dsConcat, dsToJs } from "../dstring.js";
+import { hostTriple } from "../dmd/target.js";
 import * as ldctraits from "./ldctraits.js";
 
 /** lex + parse + runSemantic over `src` (UTF-8) as a module of its own; returns the captured diagnostics
@@ -54,9 +56,10 @@ describe("gen/ldctraits.ts", () => {
         initSemaHarness();
     });
 
-    test("SMOKE: the module loads; only `semanticTraitsLDC` is exported (the C++ bodies are file-local)", () => {
+    test("SMOKE: the module loads; it exports the traits, `traitsTargetHasFeature` and the target machine", () => {
         expect(typeof ldctraits.semanticTraitsLDC).toBe("function");
-        expect(Object.keys(ldctraits)).toEqual(["semanticTraitsLDC"]);
+        expect(Object.keys(ldctraits).sort())
+            .toEqual(["createTargetMachine", "isModelledCPU", "semanticTraitsLDC", "traitsTargetHasFeature"]);
     });
 
     test("targetCPU and targetHasFeature for the default CPU (ldc2-pinned)", () => {
@@ -102,4 +105,40 @@ pragma(msg, __traits(targetHasFeature, "ne\u00E9"));
             global.params.useWarnings = DiagnosticReporting.off;
         }
     });
+
+    test("createTargetMachine: the CPU's table, an unrecognised CPU's warnings around the feature flags (ldc2-pinned)",
+        () => {
+            // `ldmd2 -mcpu=apple-m2`: `apple-m2`, `i8mm` and `bf16` true, `sve` false, no warning.
+            const probe = `pragma(msg, __traits(targetCPU), " ", __traits(targetHasFeature, "i8mm"), " ",
+    __traits(targetHasFeature, "bf16"), " ", __traits(targetHasFeature, "sve"));
+`;
+            /** `createTargetMachine(cpu, features)`, returning what it writes to stderr. */
+            const create = (cpu: string, features: string[]): string => {
+                const chunks: string[] = [];
+                const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
+                    chunks.push(chunk instanceof Uint8Array ? dsToJs(chunk) : String(chunk));
+                    return true;
+                });
+                try {
+                    ldctraits.createTargetMachine(cpu, features);
+                } finally {
+                    spy.mockRestore();
+                }
+                return chunks.join("");
+            };
+            try {
+                expect(create("apple-m2", [])).toBe("");
+                expect(runModule(probe).msgs).toBe("apple-m2 true true false\n");
+                // `ldmd2 -mcpu=x86-64-v3 -mcpu=avx2` on arm64-apple-darwin: the CPU line, the feature line, the CPU
+                // line again; then the bits of an unrecognised AArch64 CPU (none) and the name as given.
+                expect(create("x86-64-v3", ["+avx2"])).toBe(
+                    "'x86-64-v3' is not a recognized processor for this target (ignoring processor)\n"
+                    + "'+avx2' is not a recognized feature for this target (ignoring feature)\n"
+                    + "'x86-64-v3' is not a recognized processor for this target (ignoring processor)\n");
+                expect(runModule(probe).msgs).toBe("x86-64-v3 false false false\n");
+                expect(ldctraits.isModelledCPU(hostTriple(), "haswell")).toBe(false);
+            } finally {
+                create("", []);   // back to the triple's default for the tests that follow
+            }
+        });
 });
