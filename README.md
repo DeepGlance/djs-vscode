@@ -11,7 +11,7 @@ build, with no D toolchain installed.
 
 ## Install
 
-From the Extensions view (search `djs`) or with `code --install-extension deepglance.djs-dlang`, then open a folder
+From the Extensions view (search `djs`) or with `code --install-extension deepglance.djs-vscode`, then open a folder
 and a D file: no setting is needed.
 
 ## What it does
@@ -72,7 +72,7 @@ npm run build                  # dist/: the compiler, the worker, the extension
 npx tsc -p host/tsconfig.json  # type-checks the host and the integration test
 npm run test:host              # the worker and the queries on the fixture in host/fixture/
 npm test                       # the compiler's own suite
-DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-dlang-<version>.vsix
+DJS_VSCODE_SCRATCH=<dir> npm run package    # bundle + vsce: <dir>/djs-vscode-<version>.vsix
 ```
 
 Install a `.vsix` with **Extensions: Install from VSIX...**, or `code --install-extension <file>.vsix`.

@@ -79,7 +79,7 @@ async function run(): Promise<void> {
     const uri = vscode.Uri.joinPath(folder.uri, "src", "app.d");
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc);
-    const ext = vscode.extensions.getExtension<Api>("deepglance.djs-dlang");
+    const ext = vscode.extensions.getExtension<Api>("deepglance.djs-vscode");
     assert.ok(ext, "the extension is loaded");
     const api = await ext.activate();
 

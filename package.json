@@ -1,6 +1,6 @@
 {
-  "name": "djs-dlang",
-  "displayName": "djs",
+  "name": "djs-vscode",
+  "displayName": "djs-vscode",
   "version": "0.1.0",
   "license": "SEE LICENSE IN LICENSE",
   "description": "D diagnostics, hovers, completion and highlighting from the D frontend itself: djs, the LDC 1.43.0 frontend ported to TypeScript, running inside VS Code with no D toolchain installed",
