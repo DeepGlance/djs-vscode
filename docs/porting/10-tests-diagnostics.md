@@ -1309,6 +1309,8 @@ field it uses changed.
   `PrepareRenameAnswer`, `PrepareRenameResult`, `RenameAnswer`, `RenameResult`.
 - `querySignatureHelp(file, line, character, text)` and `SignatureHelpAnswer`, `SignatureHelpResult`,
   `SignatureInformation`.
+- `queryUnused()` and `UnusedAnswer`, `UnusedResult`, `UnusedDeclaration`, `UnusedKind`, `UnusedWhy`: the
+  declarations the program's entry cannot reach ("Queries" below).
 - `setDiagnosticHandler` and the `DiagnosticHandler` signature (dmd/errors.ts, `errors.d:401-408`): called by
   `printDiagnostic` with the header `Error: `, `Warning: `, `Deprecation: `, `  Tip: `, or seven spaces for a
   supplemental line; answering true suppresses the print and the source-line context. The handler is not reset by
@@ -1614,8 +1616,8 @@ edits under `-i` are keep.test.ts's and the five modules'.
 text)`, `queryInlayHints(file, text, range)`, `queryInactiveRanges(file, text)`, `queryExpansionSites(file, text)`,
 `queryExpansion(file, range, text)`, `queryAst(file, text)`, `queryInstances(files)`, `queryImports()`,
 `queryCompletion(file, text, position)`, `queryDocumentSymbols(file, text)`, `queryReferences(file, line, character,
-text)`, `queryPrepareRename(file, line, character, text)`, `queryRename(file, line, character, text, newName)` and
-`querySignatureHelp(file, line, character, text)` (src/query.ts, exported by src/djs.ts) answer on the analysed AST the last
+text)`, `queryPrepareRename(file, line, character, text)`, `queryRename(file, line, character, text, newName)`,
+`querySignatureHelp(file, line, character, text)` and `queryUnused()` (src/query.ts, exported by src/djs.ts) answer on the analysed AST the last
 compile left, whatever it was (`djsMain` or `djsMainKept`, fresh or kept, from the disk or a host's texts), between
 compiles. That is what "the last good index" means for a host: the queries answer from the last compile that analysed
 the file, and a compile never leaves an older one behind. In editor mode a compile of a half-typed buffer analyses the
@@ -1983,6 +1985,31 @@ callee; an aggregate's name gives its constructors. A signature is `{ label, par
 name(params)` (a constructor's `S(params)`, a template's parameters after the name), each parameter as hdrgen prints it
 with its span in the label, the doc comment's summary. The active parameter counts the commas at the call's depth
 before the position, plus one for a UFCS receiver.
+
+The unused code, `queryUnused()`: `{ result: { entry, declarations } }`, the entry's name and the declarations of the
+program that the entry cannot reach, for the compile's target and flags, each `{ file, range, kind, name, why }` (the
+identifier; `function`, `method`, `constructor`, `template`, `struct`, `union`, `class`, `interface`, `enum`,
+`variable`; the qualified name, a template's member through the template; `unreferenced`, `only self-referenced`, `only
+referenced from unreachable code`), sorted by file and position. Misses: no module of the compile declares a `main` (a
+library: what is unused depends on its users), the compile reported errors. The program is the modules the compile
+analysed (its roots and those `-i` compiled), D modules only (not a C module, whose headers declare the system's
+code, nor a .di), never druntime's and Phobos's. From the roots (the entry, module
+constructors and destructors, `crt_constructor`, unittests under `-unittest`, definitions with a foreign linkage,
+`export` or `pragma(mangle)`, what module-level code names), liveness spreads along what the analysed code names
+(lowered calls and string mixins' code included, and the template instances the program reaches, Phobos's among them),
+along the tokens of the user's modules resolved as the semantic tokens resolve them (what CTFE, `typeof`, `is`,
+`__traits(compiles)` and constraints folded away), and along the names written where no analysis ran: a branch not
+chosen, a unittest without `-unittest`, a body not analysed, and, where a module spells `mixin(` or `__traits(`, string
+literals. Precision before recall: a name in doubt keeps every declaration so named live. A live aggregate keeps the
+members the compiler and druntime call (destructor, postblit, copy constructor, `opAssign`, `opEquals`, `opCmp`,
+`toHash`, `toString`, invariant, `alias this`); a virtual function is live when its class is and a member of its
+override family is named, or the family reaches a function outside the user's modules (`Object.toString`). Reported:
+functions, templates, aggregates, enums, mutable module and static variables (not `extern`), the outermost unused one
+only; not
+fields, locals, parameters, enum members, manifest constants, `const` or `immutable` variables, aliases, string mixins'
+declarations, unittests, imports. A declaration only a module the compile does not import uses is reported (unused in
+this program). Cost (src/query.ts header): a walk of the user's modules and the reached instances, and every token of
+the user's modules resolved; a large application under `-i` (165 D modules), ~0.8 s right after a compile, ~0.45 s once the indexes are built.
 
 How the symbol is found (src/query.ts header): per file and per compile an index, built at the first query on the file
 and dropped when the next compile starts, from a walk of the module's analysed AST and of the members of the template

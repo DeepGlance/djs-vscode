@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (preview)
+
+On djs 0.2.0.
+
+- Unused code: the declarations the program's `main` cannot reach (functions, methods, templates, aggregates, enums,
+  mutable globals) shown as greyed hints in the modules the last compile analysed, for its target and flags, the
+  reason on hover ("unused in this build: <kind> <name>, <why>"). Asked after the compile of a save or an opening; a
+  compile with errors, or without a `main`, gives none. Setting `djs.unusedCode` (on by default); command
+  **djs: Show Unused Code** lists them in a quick pick.
+
 ## 0.1.0 (preview)
 
 The first release, on djs 0.1.0 (the LDC 1.43.0 frontend, DMD 2.113, in TypeScript).

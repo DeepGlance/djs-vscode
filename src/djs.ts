@@ -1263,9 +1263,10 @@ export {
     type InactiveRangesAnswer, type InactiveRangesResult, type InlayHint, type InlayHintsAnswer, type InlayHintsResult,
     type InstanceSite, type InstancesAnswer, type InstancesResult, type QueryMiss, type QueryPosition, type QueryRange,
     type SemanticTokensAnswer, type SemanticTokensResult, type SymbolKindName, type TemplateInstances,
+    type UnusedAnswer, type UnusedDeclaration, type UnusedKind, type UnusedResult, type UnusedWhy,
     SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, STALE_REASON, queryAst, queryCompletion, queryDefinition,
     queryDocumentSymbols, queryExpansion, queryExpansionSites, queryPrepareRename, queryReferences, queryRename,
-    querySignatureHelp,
+    querySignatureHelp, queryUnused,
     queryHover, queryImports, queryInactiveRanges, queryInlayHints, queryInstances, querySemanticTokens,
 } from "./query.js";
 

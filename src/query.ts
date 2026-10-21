@@ -1,15 +1,15 @@
 // Queries on the last compile's analysed AST, for an editor host: the hover text and the declaration of the symbol
 // under a position, the semantic tokens, the inlay hints, the inactive ranges and the expansion peeks of a file, the
 // AST view of a module, the template instances of files, the modules loaded with their imports, the names after a `.`
-// and those in scope, the outline of a file, the references of a symbol and its rename, and a call's signatures (10
-// §4.7, "Queries").
+// and those in scope, the outline of a file, the references of a symbol and its rename, a call's signatures, and the
+// declarations the program's entry cannot reach (10 §4.7, "Queries").
 //
 // Hand-written djs module, NOT a port of a dmd/ file: the 1.43.0 frontend has no query API (D language servers such as
 // serve-d run their own analysis). The host contract is 10 §4.7; the entries are `queryHover`, `queryDefinition`,
 // `querySemanticTokens` (with its legend, `SEMANTIC_TOKEN_TYPES` and `SEMANTIC_TOKEN_MODIFIERS`), `queryInlayHints`,
 // `queryInactiveRanges`, `queryExpansionSites`, `queryExpansion`, `queryAst`, `queryInstances`, `queryImports`,
 // `queryCompletion`, `queryDocumentSymbols`, `queryReferences`, `queryPrepareRename`, `queryRename`,
-// `querySignatureHelp` and `dropQueryIndex`, exported through src/djs.ts.
+// `querySignatureHelp`, `queryUnused` and `dropQueryIndex`, exported through src/djs.ts.
 //
 // THE CONTRACT. A query reads the frontend's module table (`Module.amodules`) as the last compile left it, whatever
 // that compile was (`djsMain` or `djsMainKept`, fresh or kept), and runs between compiles only. It is read-only: no
@@ -373,23 +373,66 @@
 // summary is the hover's. The active parameter counts the commas at the call's depth before the position, plus one for
 // a UFCS receiver (the resolved call's, or a free function after a `.`).
 //
-// Cost: the first query on a file decodes its text and walks its AST and its templates' instances (a large
-// application module: ~50 ms); the next ones compare the request's text with the compiled one, look the key up and print.
-// The tokens of a file are one pass over its bytes and one hit lookup per identifier, the fallback where none answers
-// (a large application module under -i: 8998 tokens, ~25 ms with the index built, ~95 ms when it builds it; the fallback is
-// ~4 ms of that and 954 of the tokens, the folded enum members among them). The inactive ranges scan the text once
-// per conditional decided; the inlay hints of a range look at each of its declarations and calls and print their
-// types and signatures. A completion scans the request's text (its comments and literals, the move, when it is not
-// the compiled one, ~2 ms on that module) and prints its items (that module under -i, at a load of 4: a struct's 35
-// items ~3 ms, a module's 44 ~2 ms, an enum's 10 ~0.1 ms, a string's 71, 64 of them UFCS, ~5 ms; ~50 ms when the
-// request builds the index).
+// UNUSED (`queryUnused`). The declarations of the program the entry cannot reach, for the compile's target and flags:
+// the modules it analysed (its roots and those `-i` compiled), never druntime's and Phobos's, are the program. The
+// graph's nodes are the analysed symbols, each template instance's copy its own (its code differs); a declaration is
+// live when one of its copies is (`referenceKey`: a template's member, a function template). Edges, unioned:
+//   1. the analysed code of each node (`ReachWalker`): every symbol an expression names (variables, calls, members,
+//      `new`, delegates, function literals, templates) and every aggregate or enum in an expression's or a declared
+//      type, lowered nodes included (a `foreach` over `opApply` or a range, an operator's overload, `opDispatch`, a
+//      copy constructor) and the code string mixins produced, which is ordinary AST once analysed. The template
+//      instances live code reaches are walked wherever their template is (`writeln!S` calls `S.toString`); the
+//      non-template code of druntime and Phobos is not analysed and names nothing.
+//   2. the token net, for what the analysis folded away (a CTFE call in `enum x = f();`, `typeof`, `is`,
+//      `__traits(compiles)`, a constraint, a `static if` or `static assert` condition): each identifier of a user's
+//      module resolved as the tokens resolve it (`tokenSymbol`), from the innermost analysed function holding it, else
+//      the aggregate, enum or template whose extent holds it (`Reach.holders`), else the module, which is a root.
+//   3. the names written where no analysis ran but code is: in a branch of a `version`, `debug` or `static if` the
+//      compile did not choose, in a unittest without `-unittest`, a name keeps every user's declaration of that name
+//      live with its holder (a function only another target or the tests call is not reported); in a live function
+//      whose body no analysis ran, likewise; in a string literal, when the module's code spells `mixin(` or
+//      `__traits(` (a function a string mixin's code calls in CTFE leaves no other trace: the mixin's text is not
+//      kept).
+// Roots: the entry (`main`, C `main`, `WinMain`, `DllMain`), the module constructors and destructors,
+// `pragma(crt_constructor)` and `crt_destructor`, the unittests under `-unittest`, the definitions with a linkage other
+// than D's, `export` or `pragma(mangle)`, the aggregates of another class kind (C++, Objective-C), what module-level
+// code names; every class once `Object.factory` or `TypeInfo_Class.find` is reached. A live node keeps the declaration
+// it sits in (a template instance its template); a live aggregate its destructor, postblit, copy constructor,
+// `opAssign`, `opEquals`, `opCmp`, `toHash`, `toString`, invariant, `alias this` target, base classes and fields'
+// types (TypeInfo and the runtime call them with no node). Virtual functions form families by `foverrides` (interfaces
+// included): a member is live when its class is and one member of its family is named, or when the family reaches a
+// function outside the user's modules (`Object.toString`, which druntime calls).
+// Reported: functions (free, member, nested; a function template by its template), templates, aggregates, enums and
+// mutable module or static variables (not `extern`), declared at their identifier in a user's D file (not a C module's
+// headers, not a .di), the outermost unused one only (an unused struct's methods are not listed again). Not reported,
+// since an analysis folds or hides their uses: fields, locals, parameters, enum members, manifest constants and `const`
+// or `immutable` variables, aliases, the declarations a string mixin made, unittests, imports. Why (`UnusedWhy`):
+// nothing names it; only itself or code nested in it does; only unused code does (or a template no instance analysed
+// names it). A declaration only a module the compile does not import uses (another program's, one imported in a branch
+// not compiled) is reported: unused in this program.
+// Misses: no entry (a library compile: what is unused depends on its users); a compile with errors.
+//
+// Cost: the first query on a file decodes its text and walks its AST and its templates' instances (a large application
+// module: ~50 ms); the next ones compare the request's text with the compiled one, look the key up and print. The
+// tokens of a file are one pass over its bytes and one hit lookup per identifier, the fallback where none answers (a
+// large application module under -i: 8998 tokens, ~25 ms with the index built, ~95 ms when it builds it; the fallback
+// is ~4 ms of that and 954 of the tokens, the folded enum members among them). The unused code walks the user's modules
+// and the instances the program reaches, and resolves every token of those modules (that application, 165 D modules
+// under -i: ~0.8 s with the indexes to build, ~0.45 s with them built). The inactive ranges scan the text once per
+// conditional decided; the inlay hints of a range look at each of its declarations and calls and print their types and
+// signatures. A completion scans the request's text (its comments and literals, the move, when it is not the compiled
+// one, ~2 ms on that module) and prints its items (that module under -i, at a load of 4: a struct's 35 items ~3 ms, a
+// module's 44 ~2 ms, an enum's 10 ~0.1 ms, a string's 71, 64 of them UFCS, ~5 ms; ~50 ms when the request builds the
+// index).
 
 import { resolve } from "node:path";
 import { SemanticTimeTransitiveVisitor } from "./dmd/visitor/index.js";
 import { Module } from "./dmd/dmodule.js";
 import { Include } from "./dmd/cond.js";
 import { Dsymbol, PASS, Visibility } from "./dmd/dsymbol.js";
-import { MODFlags, STC, Sizeok, TY, VarArg } from "./dmd/astenums.js";
+import { FileType, LINK, MODFlags, STC, Sizeok, TY, VarArg } from "./dmd/astenums.js";
+import { global } from "./dmd/globals.js";
+import { isVirtualMethod } from "./dmd/funcsem.js";
 import { DocComment } from "./dmd/doc.js";
 import {
     EXPtoString, HdrGenState, dsymbolToCBuffer, dsymbolToChars, expToCBuffer, expressionToChars,
@@ -406,26 +449,27 @@ import { Identifier } from "./dmd/identifier.js";
 import { DYNCAST } from "./dmd/rootobject.js";
 import { cstr } from "./dstring.js";
 import type { DString } from "./dstring.js";
+import { ClassKind } from "./dmd/aggregate.js";
 import type { AggregateDeclaration } from "./dmd/aggregate.js";
 import { ConditionalDeclaration, StaticForeachDeclaration } from "./dmd/attrib.js";
 import type { MixinDeclaration } from "./dmd/attrib.js";
 import type { ClassDeclaration } from "./dmd/dclass.js";
-import type { AliasDeclaration, VarDeclaration } from "./dmd/declaration.js";
+import type { AliasDeclaration, Declaration, VarDeclaration } from "./dmd/declaration.js";
 import type { EnumDeclaration, EnumMember } from "./dmd/denum.js";
 import type { Import } from "./dmd/dimport.js";
 import type { ScopeDsymbol } from "./dmd/dsymbol.js";
 import { TemplateInstance } from "./dmd/dtemplate.js";
 import type { TemplateDeclaration, TemplateMixin } from "./dmd/dtemplate.js";
 import type {
-    AssignExp, CallExp, CastExp, CmpExp, DelegateExp, DotTemplateExp, DotTemplateInstanceExp, DotTypeExp, DotVarExp,
-    DsymbolExp, Expression, NewExp, NotExp, ScopeExp, StructLiteralExp, SuperExp, SymOffExp, TemplateExp, ThisExp,
-    TypeExp, VarExp,
+    AssignExp, BinExp, CallExp, CastExp, CmpExp, DeclarationExp, DelegateExp, DotTemplateExp, DotTemplateInstanceExp,
+    DotTypeExp, DotVarExp, DsymbolExp, Expression, FuncExp, NewExp, NotExp, ScopeExp, StructLiteralExp, SuperExp,
+    SymOffExp, TemplateExp, ThisExp, TypeExp, UnaExp, VarExp,
 } from "./dmd/expression.js";
 import type { FuncDeclaration } from "./dmd/func.js";
 import type { Loc, SourceLoc } from "./dmd/location.js";
 import { Type } from "./dmd/mtype.js";
 import type { Parameter, TypeFunction } from "./dmd/mtype.js";
-import type { Catch, CompoundStatement, Statement } from "./dmd/statement.js";
+import type { Catch, CompoundStatement, ExpStatement, Statement } from "./dmd/statement.js";
 import { compiledImports } from "./dmd/compiler.js";
 import { keepAllGeneratedNames, keepGeneratedNames, keepRenumbered } from "./keep.js";
 import type { FreshNumber } from "./keep.js";
@@ -8089,4 +8133,902 @@ function summaryOf(sym: Dsymbol): string {
     const doc = docOf(sym);
     const summary = doc === null ? null : DocComment.parse(sym, doc).summary;
     return simplifyMacros(str(summary?.body_ ?? null).replace(/\s+/g, " ").trim());
+}
+
+// ── unused code ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** What an unused declaration is (UNUSED in the header). */
+export type UnusedKind = "function" | "method" | "constructor" | "template" | "struct" | "union" | "class"
+    | "interface" | "enum" | "variable";
+
+/**
+ * Why a declaration is unused: nothing names it; only itself, or code nested in it, does; or only declarations that
+ * are themselves unused (and code no analysis ran, a template without instances) do.
+ */
+export type UnusedWhy = "unreferenced" | "only self-referenced" | "only referenced from unreachable code";
+
+/** One unused declaration, at its identifier, the file as the compiler names it. */
+export interface UnusedDeclaration {
+    file: string;
+    range: QueryRange;
+    kind: UnusedKind;
+    /** The qualified name, a template's member through the template (`app.Box.unused`, not `app.Box!int.unused`). */
+    name: string;
+    why: UnusedWhy;
+}
+
+/** The unused declarations of the program, sorted by file then position, and the program's entry. */
+export interface UnusedResult {
+    entry: string;
+    declarations: UnusedDeclaration[];
+}
+
+/** The answer of `queryUnused`: the declarations, or why there is none (the program has no entry, errors). */
+export type UnusedAnswer = { result: UnusedResult } | QueryMiss;
+
+/**
+ * The declarations of the last compile's program that its entry cannot reach (UNUSED in the header), in the modules
+ * it analysed (its roots and those `-i` compiled), never in druntime's and Phobos's; read-only, between compiles
+ * (THE CONTRACT). Misses: no module of the compile declares a `main` (a library: what is unused depends on its
+ * users), the compile reported errors (an analysis cut short names less than the program does). Cost: one walk of the
+ * analysed code of every declaration of those modules and of the template instances the program reaches, the index
+ * of each of those modules (the token net), then a pass over the graph.
+ */
+export function queryUnused(): UnusedAnswer {
+    return printing(() => {
+        if (global.errors !== 0)
+            return miss("the last compile reported errors");
+        return new Reach().run();
+    });
+}
+
+/** A symbol's identity in the report: `referenceKey`, memoized per run. */
+type ReachKey = string | Dsymbol;
+
+/** A family of virtual functions joined by `foverrides`, one vtable slot; `library` when a member is not the user's. */
+interface Family {
+    members: FuncDeclaration[];
+    called: boolean;
+    library: boolean;
+}
+
+/** What holds a token of the code for the nets: a node, a function body no analysis ran, a skipped unittest. */
+type Holder = Dsymbol | "unanalysed" | "unittest";
+
+/** An extent of a module's text and what holds the code in it (`Reach.holders`). */
+interface HolderExtent {
+    start: number;
+    end: number;
+    holder: Holder;
+}
+
+/** Special members the compiler or druntime calls without a node in the analysed code (TypeInfo, the vtable). */
+const IMPLICIT_MEMBERS: ReadonlySet<string> = new Set(["opEquals", "opCmp", "toHash", "toString", "opAssign"]);
+
+/**
+ * What one declaration's analysed code names (UNUSED in the header): every symbol an expression refers to and every
+ * aggregate or enum in a type it uses, lowered nodes and string-mixin code included (both are ordinary AST once
+ * analysed); the declarations nested in it are collected apart (`declared`), not walked: each is its own node.
+ * Read-only, like IndexWalker (the base class's recursion flag on struct literals replaced by a set of its own).
+ */
+class ReachWalker extends SemanticTimeTransitiveVisitor {
+    readonly named = new Set<Dsymbol>();
+    readonly declared: Dsymbol[] = [];
+    private readonly types = new Set<Type>();
+    private readonly literals = new Set<StructLiteralExp>();
+
+    private add(s: Dsymbol | null): void {
+        if (s !== null)
+            this.named.add(s);
+    }
+
+    /** The aggregates and enums `t` is made of: its elements, a function's return and parameter types. */
+    typeRefs(t: Type | null): void {
+        if (t === null || this.types.has(t))
+            return;
+        this.types.add(t);
+        this.add(typeSymbol(t));
+        const tf = t.isTypeFunction() ?? t.isTypeDelegate()?.next?.isTypeFunction() ?? null;
+        if (tf !== null) {
+            this.typeRefs(tf.next);
+            for (const p of tf.parameterList.parameters ?? [])
+                this.typeRefs(p?.type ?? null);
+            return;
+        }
+        this.typeRefs(t.isTypeAArray()?.index ?? null);
+        this.typeRefs(t.isTypeVector()?.basetype ?? null);
+        for (const p of t.isTypeTuple()?.arguments ?? [])
+            this.typeRefs(p?.type ?? null);
+        this.typeRefs(elementType(t) ?? t.isTypePointer()?.next ?? null);
+    }
+
+    /** The analysed types only: the base class walks the parse-time shapes too. */
+    override visitTypeHelper(t: Type | null): void {
+        this.typeRefs(t);
+    }
+
+    override visitExpression(e: Expression): void {
+        this.typeRefs(e.type);
+    }
+
+    override visitUnaExp(e: UnaExp): void {
+        this.typeRefs(e.type);
+        super.visitUnaExp(e);
+    }
+
+    override visitBinExp(e: BinExp): void {
+        this.typeRefs(e.type);
+        super.visitBinExp(e);
+    }
+
+    /** A TypeInfo's variable (`typeid(S)`) names the type it describes. */
+    override visitVarExp(e: VarExp): void {
+        this.add(e.var_);
+        this.typeRefs(e.type);
+        this.typeRefs(e.var_?.isTypeInfoDeclaration()?.tinfo ?? null);
+    }
+
+    override visitSymOffExp(e: SymOffExp): void {
+        this.add(e.var_);
+        this.typeRefs(e.type);
+    }
+
+    override visitDotVarExp(e: DotVarExp): void {
+        this.add(e.var_);
+        this.typeRefs(e.type);
+        super.visitDotVarExp(e);
+    }
+
+    override visitDsymbolExp(e: DsymbolExp): void {
+        this.add(e.s);
+    }
+
+    override visitScopeExp(e: ScopeExp): void {
+        this.add(e.sds);
+        super.visitScopeExp(e);
+    }
+
+    override visitTemplateExp(e: TemplateExp): void {
+        this.add(e.fd ?? e.td);
+    }
+
+    override visitDotTemplateExp(e: DotTemplateExp): void {
+        this.add(e.td);
+        super.visitDotTemplateExp(e);
+    }
+
+    override visitDotTemplateInstanceExp(e: DotTemplateInstanceExp): void {
+        this.add(e.ti);
+        super.visitDotTemplateInstanceExp(e);
+    }
+
+    override visitDotTypeExp(e: DotTypeExp): void {
+        this.add(e.sym);
+        super.visitDotTypeExp(e);
+    }
+
+    override visitDelegateExp(e: DelegateExp): void {
+        this.add(e.func);
+        this.typeRefs(e.type);
+        super.visitDelegateExp(e);
+    }
+
+    override visitTypeExp(e: TypeExp): void {
+        this.typeRefs(e.type);
+    }
+
+    override visitNewExp(e: NewExp): void {
+        this.add(e.member);
+        this.typeRefs(e.newtype);
+        this.typeRefs(e.type);
+        super.visitNewExp(e);
+    }
+
+    override visitCallExp(e: CallExp): void {
+        this.add(e.f);
+        this.typeRefs(e.type);
+        super.visitCallExp(e);
+    }
+
+    override visitCastExp(e: CastExp): void {
+        this.typeRefs(e.to);
+        super.visitCastExp(e);
+    }
+
+    override visitStructLiteralExp(e: StructLiteralExp): void {
+        if (this.literals.has(e))
+            return;
+        this.add(e.sd);
+        this.literals.add(e);
+        for (const el of e.elements ?? [])
+            el?.accept(this);
+        this.literals.delete(e);
+    }
+
+    /** A function literal is its own node: named here, walked when the program reaches it. */
+    override visitFuncExp(e: FuncExp): void {
+        this.add(e.fd);
+    }
+
+    override visitExpStatement(s: ExpStatement): void {
+        const de = s.exp?.isDeclarationExp() ?? null;
+        if (de !== null)
+            this.visitDeclarationExp(de);
+        else
+            s.exp?.accept(this);
+    }
+
+    /** A local variable (an alias, a tuple) is part of the function; a nested function or type is a node of its own. */
+    override visitDeclarationExp(e: DeclarationExp): void {
+        const d = e.declaration!;
+        const v = d.isVarDeclaration();
+        if (v !== null)
+            this.visitVarDecl(v);
+        else if (d.isFuncDeclaration() !== null || d.isAggregateDeclaration() !== null || d.isEnumDeclaration() !== null
+            || d.isTemplateDeclaration() !== null)
+            this.declared.push(d);
+        else if (d.isTemplateMixin() !== null)
+            this.declared.push(...flatMembers([d]));
+        else
+            d.accept(this);
+    }
+
+    override visitAliasDeclaration(d: AliasDeclaration): void {
+        this.add(d.aliassym);
+        this.typeRefs(d.type);
+    }
+
+    override visitVarDecl(v: VarDeclaration): void {
+        this.typeRefs(v.type);
+        super.visitVarDecl(v);
+    }
+
+    override visitCatch(c: Catch): void {
+        this.typeRefs(c.type);
+        super.visitCatch(c);
+    }
+
+    /** A function's own code: its type, its parameters' default arguments, its lowered contracts and its body. */
+    walkFunction(fd: FuncDeclaration): void {
+        this.typeRefs(fd.type);
+        for (const p of fd.type?.isTypeFunction()?.parameterList.parameters ?? [])
+            p?.defaultArg?.accept(this);
+        this.add(fd.fdrequire());
+        this.add(fd.fdensure());
+        fd.frequire()?.accept(this);
+        fd.fensure()?.accept(this);
+        fd.fbody?.accept(this);
+    }
+}
+
+/**
+ * The members of a scope as the analysis has them: through attribute declarations, the branch each condition chose,
+ * a `static foreach`'s expanded members, a string mixin's declarations; a template mixin, then its members.
+ */
+function flatMembers(list: Iterable<Dsymbol | null> | null): Dsymbol[] {
+    const out: Dsymbol[] = [];
+    const visit = (items: Iterable<Dsymbol | null> | null): void => {
+        for (const s of items ?? []) {
+            if (s === null)
+                continue;
+            if (s instanceof ConditionalDeclaration) {
+                const inc = s.condition?.inc ?? Include.notComputed;
+                visit(inc === Include.yes ? s.decl : inc === Include.no ? s.elsedecl : null);
+            } else if (s instanceof StaticForeachDeclaration) {
+                visit(s.cache);
+            } else if (s.isAttribDeclaration() !== null) {
+                visit(s.isAttribDeclaration()!.decl);
+            } else if (s.isTemplateMixin() !== null) {
+                out.push(s);
+                visit(s.isTemplateMixin()!.members);
+            } else {
+                out.push(s);
+            }
+        }
+    };
+    visit(list);
+    return out;
+}
+
+/** Whether `s` sits in a template instance (or a template mixin): its code was analysed for the instance. */
+function inInstance(s: Dsymbol): boolean {
+    for (let p: Dsymbol | null = s; p !== null; p = p.parent) {
+        if (p.isTemplateInstance() !== null)
+            return true;
+    }
+    return false;
+}
+
+/** A variable that is a function's local, a parameter or a field: part of its owner, never a node of its own. */
+function isPartVariable(v: VarDeclaration): boolean {
+    return v.isField() || (v.toParent2()?.isFuncDeclaration() ?? null) !== null;
+}
+
+/**
+ * The reach of the program's entry over the last compile (UNUSED in the header): the user's nodes and their edges
+ * (`enumerate`), the roots, the propagation (`live`), then the report. One instance per query.
+ */
+class Reach {
+    /** The modules whose declarations are reported. */
+    private readonly user = new Set<Module>();
+    private readonly keys = new Map<Dsymbol, ReachKey>();
+    /** Every node of the user's modules, a template's instances' members included. */
+    private readonly nodes: Dsymbol[] = [];
+    private readonly isNode = new Set<Dsymbol>();
+    private readonly byName = new Map<string, Dsymbol[]>();
+    /** The aggregates, enums and templates of each module, whose extents hold code for the nets. */
+    private readonly scopes = new Map<Module, Dsymbol[]>();
+    private readonly edges = new Map<Dsymbol, ReachWalker>();
+    /** The token net and the string net, by the referrer's key (UNUSED: what the analysis folded away). */
+    private readonly keyEdges = new Map<ReachKey, Set<Dsymbol>>();
+    private readonly keyNames = new Map<ReachKey, Set<string>>();
+    /** What names each key, from the edges of the user's nodes and the nets: the referrers, for `why`. */
+    private readonly referrers = new Map<ReachKey, Set<Dsymbol>>();
+    /** The names written in function bodies no analysis ran (a template without instances, a skipped unittest). */
+    private readonly unanalysedNames = new Set<string>();
+    private readonly families = new Map<FuncDeclaration, Family>();
+    private readonly live = new Set<Dsymbol>();
+    private readonly liveKeys = new Set<ReachKey>();
+    private readonly firedKeys = new Set<ReachKey>();
+    private readonly queue: Dsymbol[] = [];
+    private readonly roots: Dsymbol[] = [];
+    private entry: FuncDeclaration | null = null;
+    private factory = false;
+
+    run(): UnusedAnswer {
+        const included = new Set(compiledImports.opSlice());
+        for (const m of Module.amodules) {
+            // a C module (ImportC: its headers' declarations, the system's) and a .di (declarations of code compiled
+            // elsewhere) declare what other code defines
+            if (m !== null && m.src !== null && (m.isRoot() || included.has(m)) && m.filetype === FileType.d
+                && !DEFAULT_LIBRARY.has(rootPackageOf(asDsymbol(m))))
+                this.user.add(m);
+        }
+        for (const m of this.user)
+            this.enumerate(asDsymbol(m), null);
+        if (this.entry === null)
+            return miss("the program has no entry: no module of the compile declares a main");
+        for (const m of this.user)
+            this.nets(m);
+        for (const r of this.roots)
+            this.markLive(r);
+        while (this.queue.length !== 0)
+            this.process(this.queue.pop()!);
+        return { result: { entry: str(this.entry.toPrettyChars()), declarations: this.report() } };
+    }
+
+    private keyOf(s: Dsymbol): ReachKey {
+        let k = this.keys.get(s);
+        if (k === undefined) {
+            k = referenceKey(s);
+            this.keys.set(s, k);
+        }
+        return k;
+    }
+
+    private isUser(s: Dsymbol): boolean {
+        const m = s.getModule();
+        return m !== null && this.user.has(m);
+    }
+
+    /**
+     * Adds `s`, a declaration of the user's modules, and what is declared in it, as nodes: a scope's members, a
+     * template's instances' members, a function's nested declarations (found by its walk); notes the roots, the
+     * entry and the virtual families. `owner` is the node `s` is declared in.
+     */
+    private enumerate(s: Dsymbol, owner: Dsymbol | null): void {
+        if (this.isNode.has(s))
+            return;
+        this.isNode.add(s);
+        this.nodes.push(s);
+        if (s.ident !== null) {
+            const list = this.byName.get(identText(s.ident)) ?? [];
+            list.push(s);
+            this.byName.set(identText(s.ident), list);
+        }
+        if (owner === null && s.isModule() !== null)
+            this.roots.push(s);
+        const scope = s.isAggregateDeclaration() ?? s.isEnumDeclaration() ?? s.isTemplateDeclaration();
+        if (scope !== null) {
+            const list = this.scopes.get(s.getModule()!) ?? [];
+            list.push(s);
+            this.scopes.set(s.getModule()!, list);
+        }
+        this.noteRoot(s);
+        const fd = s.isFuncDeclaration();
+        if (fd !== null)
+            this.joinFamily(fd);
+        const w = this.walk(s);
+        for (const t of w?.named ?? [])
+            this.refer(t, s);
+        for (const d of w?.declared ?? [])
+            this.enumerate(d, s);
+        const td = s.isTemplateDeclaration();
+        if (td !== null) {
+            for (const ti of instancesOf(td))
+                this.enumerate(ti, s);
+        }
+        const sds = fd === null ? s.isScopeDsymbol() : null;
+        if (sds !== null && td === null) {
+            for (const c of flatMembers(sds.members)) {
+                // a module's members hold the instances it made (`appendToModuleMember`), of any module's templates:
+                // the user's are enumerated through their template
+                const v = c.isVarDeclaration();
+                if (c.isImport() === null && (v === null || !v.isField())
+                    && (c.isTemplateInstance() === null || c.isTemplateMixin() !== null))
+                    this.enumerate(c, s);
+            }
+        }
+    }
+
+    /** Notes `s` as a root when the runtime, a foreign caller or the linker may reach it (UNUSED: the roots). */
+    private noteRoot(s: Dsymbol): void {
+        const fd = s.isFuncDeclaration();
+        if (fd !== null) {
+            if (fd.isMain() || fd.isCMain() || fd.isWinMain() || fd.isDllMain()) {
+                this.entry ??= fd;
+                this.roots.push(fd);
+            } else if (fd.isStaticCtorDeclaration() !== null || fd.isStaticDtorDeclaration() !== null || fd.isCrtCtor
+                || fd.isCrtDtor || (fd.isUnitTestDeclaration() !== null && global.params.useUnitTests)
+                || (fd.fbody !== null && this.exported(fd))) {
+                this.roots.push(fd);
+            }
+            return;
+        }
+        const v = s.isVarDeclaration();
+        if (v !== null && !isPartVariable(v) && (v.storage_class & STC.extern_) === 0n && this.exported(v))
+            this.roots.push(v);
+        const ad = s.isAggregateDeclaration();
+        if (ad !== null && ad.classKind !== ClassKind.d)
+            this.roots.push(ad);
+    }
+
+    /** A definition another language or the linker may name: non-D linkage, `export`, `pragma(mangle)`. */
+    private exported(d: Declaration): boolean {
+        return d.resolvedLinkage() !== LINK.d || d.isExport() || d.mangleOverride !== null;
+    }
+
+    /** Joins a virtual function to the family of the functions it overrides (`foverrides`, transitively). */
+    private joinFamily(fd: FuncDeclaration): Family | null {
+        if (this.families.has(fd))
+            return this.families.get(fd)!;
+        if (fd.isMember2() === null || !isVirtualMethod(fd))
+            return null;
+        const fam: Family = { members: [fd], called: false, library: !this.isUser(fd) };
+        this.families.set(fd, fam);
+        for (const base of fd.foverrides ?? []) {
+            if (base === null)
+                continue;
+            const other = this.joinFamily(base);
+            if (other === null || other === fam)
+                continue;
+            for (const m of other.members) {
+                fam.members.push(m);
+                this.families.set(m, fam);
+            }
+            fam.called ||= other.called;
+            fam.library ||= other.library;
+        }
+        return fam;
+    }
+
+    /** The walk of `s`'s own code, once (`ReachWalker`); null for a node without code of its own. */
+    private walk(s: Dsymbol): ReachWalker | null {
+        if (this.edges.has(s))
+            return this.edges.get(s)!;
+        const w = new ReachWalker();
+        const fd = s.isFuncDeclaration();
+        const v = s.isVarDeclaration();
+        const ad = s.isAggregateDeclaration();
+        const ed = s.isEnumDeclaration();
+        const al = s.isAliasDeclaration();
+        if (fd !== null) {
+            if (fd.semanticRun >= PASS.semantic3done)
+                w.walkFunction(fd);
+            else
+                w.typeRefs(fd.type);
+        } else if (v !== null) {
+            w.visitVarDecl(v);
+        } else if (ad !== null) {
+            for (const b of ad.isClassDeclaration()?.baseclasses ?? [])
+                w.named.add(b!.sym!);
+            for (const c of flatMembers(ad.members)) {
+                const f = c.isVarDeclaration();
+                if (f !== null && f.isField())
+                    w.visitVarDecl(f);
+            }
+        } else if (ed !== null) {
+            w.typeRefs(ed.memtype);
+            for (const em of ed.members ?? [])
+                memberValue(em as EnumMember)?.accept(w);
+        } else if (al !== null) {
+            w.visitAliasDeclaration(al);
+        } else if (s.isTemplateMixin() !== null) {
+            w.named.add(s.isTemplateMixin()!.tempdecl!);
+        } else {
+            return null;
+        }
+        this.edges.set(s, w);
+        return w;
+    }
+
+    /** Notes that `from`, a user's node, names `target`. */
+    private refer(target: Dsymbol, from: Dsymbol): void {
+        if (!this.isUser(target))
+            return;
+        const k = this.keyOf(canonicalOf(target));
+        const set = this.referrers.get(k) ?? new Set();
+        set.add(from);
+        this.referrers.set(k, set);
+    }
+
+    /**
+     * The token net and the string net of a user's module (UNUSED in the header): each identifier of its code
+     * resolved as the tokens resolve it, from the innermost analysed function or the aggregate, enum or template
+     * whose extent holds it (outside them, the module: a root); the names written inside string literals when its
+     * code spells `mixin(` or `__traits(`; the names written in bodies no analysis ran.
+     */
+    private nets(m: Module): void {
+        const ix = indexOf(m);
+        hitsOf(m, ix);
+        const t = ix.bytes;
+        const file = str(m.srcfile.toChars());
+        const inactive = inactiveOf(m, ix);
+        const holders = this.holders(m, ix, file);
+        const scan = this.holderScan(holders);
+        let ia = 0;
+        let strings = false;
+        let k = 0;
+        for (let p = 0; p < t.length;) {
+            if (k < ix.nonCode.length && p >= ix.nonCode[k]![0]) {
+                p = Math.max(p, ix.nonCode[k]![1]);
+                k++;
+                continue;
+            }
+            if (!isIdentStart(t[p]) || isIdentByte(t[p - 1])) {
+                p++;
+                continue;
+            }
+            const e = identEnd(t, p);
+            const word = utf8.decode(t.subarray(p, e));
+            const next = t[skipTrivia(t, e)];
+            if ((word === "mixin" || word === "__traits") && next === 0x28)
+                strings = true;
+            while (ia < inactive.length && inactive[ia]![1] <= p)
+                ia++;
+            const literalAffix = t[e] === 0x22 || t[e] === 0x60 || t[p - 1] === 0x22 || t[p - 1] === 0x60;
+            if (!literalAffix && !KEYWORDS.has(word)) {
+                const holder = scan.at(p);
+                const range = inactive[ia] ?? null;
+                if (range !== null && range[0] <= p) {
+                    // a function in the branch is not analysed: its name keeps the declarations from the module
+                    this.keyName(typeof holder === "string" ? null : holder, word);
+                } else if (holder === "unittest") {
+                    this.keyName(null, word);
+                } else if (holder === "unanalysed") {
+                    // a body starts at its function's name, which names nothing
+                    if (!scan.startsAt(p))
+                        this.unanalysedNames.add(word);
+                } else {
+                    const sym = tokenSymbol(m, ix, p, range);
+                    if (sym !== null && !isDeclarationAt(m, ix, file, sym, p))
+                        this.keyEdge(holder, sym);
+                }
+            }
+            p = e;
+        }
+        if (!strings)
+            return;
+        const literals = this.holderScan(holders);
+        for (const [s, e] of ix.nonCode) {
+            const c = t[s];
+            const literal = c === 0x22 || c === 0x60 || (c === 0x71 && (t[s + 1] === 0x22 || t[s + 1] === 0x7b));
+            const found = literal ? literals.at(s) : "unanalysed";
+            if (found === "unanalysed")
+                continue;
+            const holder = found === "unittest" ? null : found;
+            for (const word of utf8.decode(t.subarray(s, e)).match(/[A-Za-z_]\w*/g) ?? [])
+                this.keyName(holder, word);
+        }
+    }
+
+    /**
+     * The extents that hold code in a module, innermost last at equal starts: the bodies of its functions (an
+     * analysed one by its function, one no analysis ran as `unanalysed`), and its aggregates, enums and templates.
+     */
+    private holders(m: Module, ix: FileIndex, file: string): HolderExtent[] {
+        const out: HolderExtent[] = [];
+        for (const s of this.scopes.get(m) ?? []) {
+            const name = s.loc.isValid() ? s.loc.filename() : null;
+            if (name === null || str(name) !== file || s.loc.fileOffset() >= ix.bytes.length)
+                continue;
+            const off = s.loc.fileOffset();
+            out.push({ start: declarationStart(ix.bytes, off), end: statementEnd(ix.bytes, ix.nonCode, off),
+                holder: s });
+        }
+        for (const b of ix.functions) {
+            const skipped = b.fd === null && wordAt(ix.bytes, b.start) === "unittest";
+            out.push({ start: b.start, end: b.end, holder: b.fd ?? (skipped ? "unittest" : "unanalysed") });
+        }
+        return out.sort((a, b) => a.start - b.start);
+    }
+
+    /**
+     * The innermost extent holding each position, asked in increasing order (`at`), or null for the module: the
+     * extents nest, so the ones open at a position are a stack.
+     */
+    private holderScan(holders: readonly HolderExtent[])
+        : { at(p: number): Holder | null; startsAt(p: number): boolean } {
+        let next = 0;
+        const open: HolderExtent[] = [];
+        return {
+            at(p: number): Holder | null {
+                while (next < holders.length && holders[next]!.start <= p)
+                    open.push(holders[next++]!);
+                while (open.length !== 0 && open[open.length - 1]!.end <= p)
+                    open.pop();
+                return open.length !== 0 ? open[open.length - 1]!.holder : null;
+            },
+            startsAt(p: number): boolean {
+                return open.length !== 0 && open[open.length - 1]!.start === p;
+            },
+        };
+    }
+
+    private keyEdge(holder: Dsymbol | null, sym: Dsymbol): void {
+        if (holder === null) {
+            this.roots.push(sym);
+            return;
+        }
+        this.refer(sym, holder);
+        const k = this.keyOf(holder);
+        const set = this.keyEdges.get(k) ?? new Set();
+        set.add(sym);
+        this.keyEdges.set(k, set);
+    }
+
+    private keyName(holder: Dsymbol | null, word: string): void {
+        if (!this.byName.has(word))
+            return;
+        if (holder === null) {
+            this.roots.push(...this.byName.get(word)!);
+            return;
+        }
+        for (const s of this.byName.get(word)!)
+            this.refer(s, holder);
+        const k = this.keyOf(holder);
+        const set = this.keyNames.get(k) ?? new Set();
+        set.add(word);
+        this.keyNames.set(k, set);
+    }
+
+    /** Marks `s` live; a local, a parameter, an import or a module is not a node and spreads nothing. */
+    private markLive(s: Dsymbol): void {
+        const v = s.isVarDeclaration();
+        if (this.live.has(s) || (v !== null && isPartVariable(v) && !v.isField()) || s.isImport() !== null
+            || (s.isPackage() !== null && s.isModule() === null))
+            return;
+        this.live.add(s);
+        this.queue.push(s);
+    }
+
+    /**
+     * Spreads `s`'s liveness: to what its code names, to what the nets note for its key, to the declaration it sits
+     * in, to an aggregate's implicitly called members and its virtual functions of a called family; a function whose
+     * body no analysis ran keeps every user's declaration of each name written in it (UNUSED in the header).
+     */
+    private process(s: Dsymbol): void {
+        const user = this.isUser(s);
+        const k = user ? this.keyOf(canonicalOf(s)) : null;
+        if (k !== null)
+            this.liveKeys.add(k);
+        const ti = s.isTemplateInstance();
+        if (ti !== null && ti.tempdecl !== null)
+            this.markLive(ti.tempdecl);
+        if (s.parent !== null && s.isModule() === null)
+            this.markLive(s.parent);
+        // a template mixin's code is its scope's: live with it
+        const sds = s.isModule() !== null || s.isAggregateDeclaration() !== null ? s.isScopeDsymbol() : null;
+        for (const c of sds !== null ? flatMembers(sds.members) : []) {
+            if (c.isTemplateMixin() !== null)
+                this.markLive(c);
+        }
+        if (user || inInstance(s)) {
+            for (const t of this.walk(s)?.named ?? [])
+                this.reach(t);
+        }
+        if (k !== null && !this.firedKeys.has(k)) {
+            this.firedKeys.add(k);
+            for (const t of this.keyEdges.get(k) ?? [])
+                this.reach(t);
+            for (const word of this.keyNames.get(k) ?? [])
+                this.byName.get(word)!.forEach((n) => this.markLive(n));
+        }
+        const fd = s.isFuncDeclaration();
+        if (fd !== null && fd.fbody !== null && fd.semanticRun < PASS.semantic3done && this.isUser(fd))
+            this.unanalysedBody(fd);
+        const ad = s.isAggregateDeclaration();
+        if (ad !== null && (this.isUser(ad) || inInstance(ad)))
+            this.aggregateLive(ad);
+        const al = s.isAliasDeclaration();
+        if (al !== null && al.aliassym !== null)
+            this.reach(al.aliassym);
+    }
+
+    /** `t` is named by live code. */
+    private reach(t: Dsymbol): void {
+        const fd = t.isFuncDeclaration();
+        if (fd !== null) {
+            const owner = fd.toParent()?.isClassDeclaration() ?? null;
+            if (owner !== null && rootPackageOf(owner) === "object" && ((identText(owner.ident) === "Object"
+                && identText(fd.ident) === "factory") || (identText(owner.ident) === "TypeInfo_Class"
+                && identText(fd.ident) === "find")))
+                this.objectFactory();
+            const fam = this.joinFamily(fd);
+            if (fam !== null && !fam.called) {
+                fam.called = true;
+                for (const m of fam.members) {
+                    if (this.live.has(m.isMember2()!))
+                        this.markLive(m);
+                }
+            }
+        }
+        const os = t.isOverloadSet();
+        for (const a of os?.a ?? [])
+            this.markLive(a!);
+        const od = t.isOverDeclaration();
+        if (od !== null && od.aliassym !== null)
+            this.markLive(od.aliassym);
+        this.markLive(t);
+    }
+
+    /** A live aggregate: its implicitly called members, and its virtual functions whose family is called. */
+    private aggregateLive(ad: AggregateDeclaration): void {
+        if (ad.aliasthis?.sym !== null && ad.aliasthis?.sym !== undefined)
+            this.reach(ad.aliasthis.sym);
+        for (const c of flatMembers(ad.members)) {
+            const fd = c.isFuncDeclaration();
+            if (fd === null)
+                continue;
+            const implicit = fd.isDtorDeclaration() !== null || fd.isPostBlitDeclaration() !== null
+                || fd.isInvariantDeclaration() !== null || (fd.isCtorDeclaration()?.isCpCtor ?? false)
+                || IMPLICIT_MEMBERS.has(identText(fd.ident));
+            const fam = this.families.get(fd) ?? null;
+            if (implicit || (fam !== null && (fam.called || fam.library)))
+                this.markLive(fd);
+        }
+    }
+
+    /** `Object.factory` (or `TypeInfo_Class.find`) is reached: every user's class may be made by its name. */
+    private objectFactory(): void {
+        if (this.factory)
+            return;
+        this.factory = true;
+        for (const s of this.nodes) {
+            const cd = s.isClassDeclaration();
+            if (cd !== null && cd.isInterfaceDeclaration() === null)
+                this.markLive(cd);
+        }
+    }
+
+    /** The names written in a live function's body that no analysis ran keep every user's declaration so named. */
+    private unanalysedBody(fd: FuncDeclaration): void {
+        const m = fd.getModule()!;
+        const t = indexOf(m).bytes;
+        const start = fd.loc.fileOffset();
+        const end = Math.min(fd.endloc.fileOffset(), t.length);
+        if (str(fd.loc.filename()) !== str(m.srcfile.toChars()) || end <= start)
+            return;
+        for (const word of utf8.decode(t.subarray(start, end)).match(/[A-Za-z_]\w*/g) ?? [])
+            this.byName.get(word)?.forEach((n) => this.markLive(n));
+    }
+
+    /**
+     * The unused declarations: the user's nodes of a reported kind (`unusedKind`) declared at an identifier of a
+     * user's file, whose key no live node has, the outermost only (a member of an unused aggregate, template or
+     * function is not listed again).
+     */
+    private report(): UnusedDeclaration[] {
+        const dead = new Map<ReachKey, Dsymbol>();
+        for (const s of this.nodes) {
+            const k = this.keyOf(canonicalOf(s));
+            if (typeof k === "string" && !this.liveKeys.has(k) && !dead.has(k) && unusedKind(s) !== null
+                && !isCompilerName(s))
+                dead.set(k, canonicalOf(s));
+        }
+        const out: UnusedDeclaration[] = [];
+        for (const [k, s] of dead) {
+            if (this.deadOwner(s, dead))
+                continue;
+            const d = declarationOf(s, true);
+            if (typeof d === "string")
+                continue;
+            out.push({ file: d.file, range: d.range, kind: unusedKind(s)!, name: unusedName(s), why: this.why(k) });
+        }
+        return out.sort((a, b) => a.file.localeCompare(b.file) || a.range.start.line - b.range.start.line
+            || a.range.start.character - b.range.start.character);
+    }
+
+    /** Whether a declaration `s` sits in (through a template instance, its template) is unused too. */
+    private deadOwner(s: Dsymbol, dead: ReadonlyMap<ReachKey, Dsymbol>): boolean {
+        for (let p = s.parent; p !== null && p.isModule() === null; p = p.parent) {
+            const owner = canonicalOf(p);
+            if (dead.has(this.keyOf(owner)))
+                return true;
+            if (owner !== p)
+                p = owner;
+        }
+        return false;
+    }
+
+    /** Why the declaration of key `k` is unused, from what names it (`referrers`). */
+    private why(k: ReachKey): UnusedWhy {
+        const refs = [...this.referrers.get(k) ?? []];
+        if (refs.length === 0) {
+            const name = typeof k === "string" ? null : k;
+            const s = name ?? this.nodes.find((n) => this.keyOf(canonicalOf(n)) === k) ?? null;
+            return s !== null && s.ident !== null && this.unanalysedNames.has(identText(s.ident))
+                ? "only referenced from unreachable code" : "unreferenced";
+        }
+        const self = refs.every((r) => {
+            for (let p: Dsymbol | null = r; p !== null; p = p.parent) {
+                if (this.keyOf(canonicalOf(p)) === k)
+                    return true;
+            }
+            return false;
+        });
+        return self ? "only self-referenced" : "only referenced from unreachable code";
+    }
+}
+
+/** The kind a declaration is reported as, or null when it is not reported (UNUSED in the header). */
+function unusedKind(s: Dsymbol): UnusedKind | null {
+    const fd = s.isFuncDeclaration();
+    if (fd !== null) {
+        if (fd.isFuncLiteralDeclaration() !== null || fd.isUnitTestDeclaration() !== null
+            || fd.isStaticCtorDeclaration() !== null || fd.isStaticDtorDeclaration() !== null
+            || fd.isInvariantDeclaration() !== null || fd.isPostBlitDeclaration() !== null
+            || fd.isDtorDeclaration() !== null || fd.isNewDeclaration() !== null || fd.isMain() || fd.isCMain())
+            return null;
+        if (fd.isCtorDeclaration() !== null)
+            return "constructor";
+        return fd.isMember2() !== null ? "method" : "function";
+    }
+    if (s.isTemplateDeclaration() !== null)
+        return "template";
+    if (s.isInterfaceDeclaration() !== null)
+        return "interface";
+    if (s.isClassDeclaration() !== null)
+        return "class";
+    if (s.isUnionDeclaration() !== null)
+        return "union";
+    if (s.isStructDeclaration() !== null)
+        return "struct";
+    if (s.isEnumDeclaration() !== null)
+        return s.ident !== null ? "enum" : null;
+    const v = s.isVarDeclaration();
+    if (v !== null && !isPartVariable(v)
+        && (v.storage_class & (STC.manifest | STC.const_ | STC.immutable_ | STC.extern_)) === 0n
+        && v.type !== null && !v.type.isConst() && !v.type.isImmutable() && v.isTypeInfoDeclaration() === null)
+        return "variable";
+    return null;
+}
+
+/** The qualified name of `s`, a template instance's member through its template (`app.Box.get`). */
+function unusedName(s: Dsymbol): string {
+    const parts: string[] = [];
+    for (let p: Dsymbol | null = s; p !== null; p = p.parent) {
+        const ti = p.isTemplateInstance();
+        if (ti !== null && ti.isTemplateMixin() === null && ti.tempdecl !== null)
+            p = ti.tempdecl;
+        if (p.isModule() !== null) {
+            parts.push(str(p.toPrettyChars()));
+            break;
+        }
+        const name = p.isCtorDeclaration() !== null ? "this" : identText(p.ident);
+        // an eponymous member is named by its template alone
+        if ((ti === null || ti.isTemplateMixin() === null) && (ti === null || parts[parts.length - 1] !== name))
+            parts.push(name);
+    }
+    return parts.reverse().join(".");
 }

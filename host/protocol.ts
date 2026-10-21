@@ -3,7 +3,8 @@
 // Plain structured-clone data, request and reply matched by `id`: the same shape would travel over a child process's
 // IPC channel, so swapping the worker for a child (ruling 3, 9/10) changes the transport, not the messages. Two kinds
 // of request: a compile, and a query (hover, definition, semantic tokens, inlay hints, inactive ranges, expansion
-// sites, expansion, AST, instances, imports, completion, document symbols, references, rename, signature help) on what
+// sites, expansion, AST, instances, imports, completion, document symbols, references, rename, signature help, unused
+// code) on what
 // the last compile analysed (djs 10 §4.7, "Queries"); the worker answers one request at a time, in arrival order.
 
 /**
@@ -269,10 +270,19 @@ export interface SignatureHelpRequest extends Position {
     text: string;
 }
 
+/**
+ * Main thread -> worker: the declarations of the last compile's program that its entry cannot reach (djs
+ * `queryUnused`), in the modules that compile analysed.
+ */
+export interface UnusedRequest {
+    kind: "unused";
+    id: number;
+}
+
 /** Main thread -> worker: any request; the worker answers one at a time, in arrival order. */
 export type Request = CompileRequest | QueryRequest | SemanticTokensRequest | InlayHintsRequest | InactiveRangesRequest
     | ExpansionRequest | ExpansionSitesRequest | AstRequest | InstancesRequest | ImportsRequest | CompletionRequest
-    | DocumentSymbolsRequest | ReferencesRequest | RenameRequest | SignatureHelpRequest;
+    | DocumentSymbolsRequest | ReferencesRequest | RenameRequest | SignatureHelpRequest | UnusedRequest;
 
 /** Worker -> main thread: the hover of a QueryRequest (djs `queryHover`). */
 export interface HoverReply {
@@ -623,6 +633,32 @@ export interface SignatureHelpReply {
     ms: number;
 }
 
+/**
+ * One unused declaration (djs `UnusedDeclaration`): the file as the compiler names it, the identifier, the kind
+ * (`function`, `method`, `struct`, ...), the qualified name, why (`unreferenced`, `only self-referenced`, `only
+ * referenced from unreachable code`).
+ */
+export interface UnusedDeclaration {
+    file: string;
+    range: Range;
+    kind: string;
+    name: string;
+    why: string;
+}
+
+/** Worker -> main thread: the unused code of an UnusedRequest (djs `queryUnused`). */
+export interface UnusedReply {
+    kind: "unused";
+    id: number;
+    /**
+     * The program's entry and its unused declarations, sorted by file and position; null when there is no answer
+     * (`reason`: no `main` in the compile, a compile with errors, no compile).
+     */
+    result: { entry: string; declarations: UnusedDeclaration[] } | null;
+    reason: string;
+    ms: number;
+}
+
 /** djs's semantic-token legend: the names `SemanticTokensReply` indexes (`SEMANTIC_TOKEN_TYPES`, `..._MODIFIERS`). */
 export interface TokenLegend {
     types: string[];
@@ -641,6 +677,6 @@ export interface ReadyMessage {
 /** Worker -> main thread: the reply to a `Request`, matched by `id` (`DjsCompiler.pending` resolves with it). */
 export type Reply = CompileReply | HoverReply | DefinitionReply | SemanticTokensReply | InlayHintsReply
     | InactiveRangesReply | ExpansionReply | ExpansionSitesReply | AstReply | InstancesReply | ImportsReply
-    | CompletionReply | DocumentSymbolsReply | ReferencesReply | RenameReply | SignatureHelpReply;
+    | CompletionReply | DocumentSymbolsReply | ReferencesReply | RenameReply | SignatureHelpReply | UnusedReply;
 
 export type WorkerMessage = Reply | ReadyMessage;

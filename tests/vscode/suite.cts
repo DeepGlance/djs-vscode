@@ -28,8 +28,9 @@
 // `buffer` (an outline asked before that compile ran waits for it); a typed `lib.` completes, through VS Code's
 // completion command, with lib.d's `libValue`, a function, its signature and doc comment's summary, and so does a
 // request without a dot, among the imported modules' names; a call typed gets
-// lib.d's `twice` from VS Code's signature-help command, which waits for its pause compile. Last, VS Code's
-// rename command renames `libValue` in both files, which saved compile with no new error.
+// lib.d's `twice` from VS Code's signature-help command, which waits for its pause compile. VS Code's rename command
+// renames `libValue` in both files, which saved compile with no new error. Last, app.d saved without errors gives
+// lib.d's unused functions as hints tagged Unnecessary, which the setting turned off clears.
 
 import vscode = require("vscode");
 import assert = require("node:assert/strict");
@@ -363,6 +364,27 @@ async function run(): Promise<void> {
     assert.equal(afterRename.length, 2, JSON.stringify(afterRename));
     assert.ok(afterRename.every((d) => !d.includes("undefined identifier")), JSON.stringify(afterRename));
     assert.match(doc.lineAt(call.line).text, /libNumber\(\)/);
+
+    // unused code: app.d without its errors, saved: lib.d's `four` (nothing calls it) and `twice` (only `four` does)
+    // are hints tagged Unnecessary; the setting off clears them
+    const clean = new vscode.WorkspaceEdit();
+    clean.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0),
+        "module app;\nimport lib;\nvoid main() { int x = libNumber(); }\nversion (Foo) {} else static assert(0);\n");
+    assert.ok(await vscode.workspace.applyEdit(clean));
+    const beforeClean = api.lastCompile();
+    assert.ok(await doc.save());
+    await compiledAfter(api, beforeClean, 60000);
+    const unusedOf = (): string[] => vscode.languages.getDiagnostics(libUri)
+        .filter((d) => d.tags?.includes(vscode.DiagnosticTag.Unnecessary))
+        .map((d) => `${d.range.start.line}:${d.range.start.character} ${d.severity} ${d.message}`);
+    const unusedBy = Date.now() + 30000;
+    while (unusedOf().length < 2 && Date.now() <= unusedBy)
+        await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(unusedOf(), [
+        "3:5 3 unused in this build: function lib.twice, only referenced from unreachable code",
+        "5:4 3 unused in this build: function lib.four, unreferenced"]);
+    await vscode.workspace.getConfiguration("djs").update("unusedCode", false, vscode.ConfigurationTarget.Workspace);
+    assert.deepEqual(unusedOf(), []);
 }
 
 export = { run };

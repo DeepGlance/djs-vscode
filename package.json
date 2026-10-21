@@ -1,7 +1,7 @@
 {
   "name": "djs-vscode",
   "displayName": "djs-vscode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "SEE LICENSE IN LICENSE",
   "description": "D diagnostics, hovers, completion and highlighting from the D frontend itself: djs, the LDC 1.43.0 frontend ported to TypeScript, running inside VS Code with no D toolchain installed",
   "icon": "extension/icon.png",
@@ -141,6 +141,12 @@
           "default": true,
           "scope": "resource",
           "markdownDescription": "Show a code lens over each construct the last compile expanded (a string mixin, a template instance, a folded value); clicking it peeks at the expansion, as **djs: Show Expansion** does at the cursor."
+        },
+        "djs.unusedCode": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Grey out the declarations the program's `main` cannot reach (functions, methods, templates, aggregates, enums, mutable globals), in the modules the last compile analysed, for its target and flags; a name used in a branch not compiled or in a unittest keeps a declaration. Asked after a compile at a save or an opening (a compile with errors, or one without a `main`, gives none). **djs: Show Unused Code** lists them."
         }
       }
     },
@@ -152,6 +158,10 @@
       {
         "command": "djs.showAst",
         "title": "djs: Show AST"
+      },
+      {
+        "command": "djs.showUnused",
+        "title": "djs: Show Unused Code"
       },
       {
         "command": "djs.instancesCurrentFile",
@@ -211,6 +221,10 @@
         {
           "command": "djs.showAst",
           "when": "editorLangId == d && resourceScheme == file"
+        },
+        {
+          "command": "djs.showUnused",
+          "when": "djs.active"
         },
         {
           "command": "djs.instancesCurrentFile",

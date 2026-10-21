@@ -6,8 +6,7 @@ import { Worker } from "node:worker_threads";
 import type {
     AstReply, CompileReply, CompletionReply, DefinitionReply, DocumentSymbolsReply, ExpansionReply, ExpansionSitesReply,
     HoverReply, ImportsReply, InactiveRangesReply, InlayHintsReply, InstancesReply, Position, Range, ReferencesReply,
-    RenameReply, Reply, Request, SignatureHelpReply,
-    SemanticTokensReply, TokenLegend, WorkerMessage,
+    RenameReply, Reply, Request, SignatureHelpReply, SemanticTokensReply, TokenLegend, UnusedReply, WorkerMessage,
 } from "./protocol.js";
 
 /** Where `DjsCompiler.send` puts a call: after every queued one, or ahead of those queued `last`. */
@@ -20,7 +19,8 @@ export const STACK_SIZE_MB = 8;
  * A djs compiler in a worker thread.
  *
  * `compile` and the queries (`hover`, `definition`, `semanticTokens`, `inlayHints`, `inactiveRanges`, `expansionSites`,
- * `expansion`, `ast`, `instances`, `imports`, `completion`, `documentSymbols`, `references`, `rename`, `signatureHelp`)
+ * `expansion`, `ast`, `instances`, `imports`, `completion`, `documentSymbols`, `references`, `rename`, `signatureHelp`,
+ * `unused`)
  * run one at a time, in one queue, each resolving with the worker's reply. The queue runs in call order, except that
  * `hover`, `completion`, `references`, `rename` and `signatureHelp` (a user waiting on the answer) go ahead of every
  * call queued and not yet started, in call order among themselves: a refresh's tokens, hints, lenses or AST print
@@ -50,8 +50,9 @@ export const STACK_SIZE_MB = 8;
  * compile, then ~2-10 ms, ~5-45 ms round trip; an outline (that program: 294 symbols), ~80 ms with the index build,
  * ~25 ms after; the references, the index of each analysed module that spells the name, then a lookup per occurrence
  * (that program: 13-60 ms); a rename, the references and a scan of the mixins spelling the name (~55 ms); signature
- * help, ~0.5 ms. A compile with `texts` copies them to the worker on top of its cost (that program with a one-line
- * edit in a function body, kept from the buffer: ~0.9 s at load 9).
+ * help, ~0.5 ms; the unused code, a walk of the program and the tokens of its modules resolved (that program:
+ * ~0.8 s with the files' indexes to build, ~0.45 s with them built). A compile with `texts` copies them to the worker
+ * on top of its cost (that program with a one-line edit in a function body, kept from the buffer: ~0.9 s at load 9).
  */
 export class DjsCompiler {
     private worker: Worker | null = null;
@@ -288,6 +289,14 @@ export class DjsCompiler {
         : Promise<SignatureHelpReply | null> {
         return this.send<SignatureHelpReply>((id) => ({ kind: "signatureHelp", id, file, line, character, text }),
             cancelled, "next");
+    }
+
+    /**
+     * The declarations of the last compile's program that its entry cannot reach, queued last; null when `cancelled`
+     * answers true at its turn. See UnusedRequest and UnusedReply.
+     */
+    unused(cancelled?: () => boolean): Promise<UnusedReply | null> {
+        return this.send<UnusedReply>((id) => ({ kind: "unused", id }), cancelled);
     }
 
     /**

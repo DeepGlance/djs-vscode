@@ -1,15 +1,16 @@
-// Tests for src/query.ts, the hover, go-to-definition, semantic-tokens, inlay-hints and inactive-ranges queries (10
-// §4.7, "Queries"), through `djsMainKept` and `djsMain` (src/djs.ts) with the doc-comment knob on. Hand-written djs
-// module; no D unittests to port.
+// Tests for src/query.ts, the hover, go-to-definition, semantic-tokens, inlay-hints and inactive-ranges queries, the
+// unused code (10 §4.7, "Queries"), through `djsMainKept` and `djsMain` (src/djs.ts) with the doc-comment knob on.
+// Hand-written djs module; no D unittests to port.
 //
 // Two modules in a temporary directory: lib.d (a documented function, a deprecated one, a documented struct template,
 // a ditto'd overload) and app.d, which uses them; then fb.d (code the analysis skipped, member chains), tk.d (a token
 // of each type and modifier, branches not chosen), ih.d (inlay hints, inactive ranges), xp.d (expansion peeks, the
 // hover's Resolved section), rv.d (the review's shapes), ef.d (enum members whose initializer failed), avlib.d and
-// avapp.d (the AST view, the instances), ima.d, imb.d and imc.d (the imports) and ro.d. Positions are found by
-// searching the text for a token, so an edit of the sources does not shift them by hand. The last tests are the
-// read-only contract: a query calls no `optimize` and reports nothing, and queries (tokens included) between two kept
-// compiles leave the second compile's output equal to a fresh compile's.
+// avapp.d (the AST view, the instances), ima.d, imb.d and imc.d (the imports), ua.d and ub.d (unused code) and ro.d.
+// Positions are found by searching the text for a token, so an edit of the sources does not shift them by hand. Then
+// the read-only contract: a query calls no `optimize` and reports nothing, and queries (tokens included) between two
+// kept compiles leave the second compile's output equal to a fresh compile's; the unused code last (its kept-compile
+// test resets the modules, which the contract's tests import after their compiles).
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2604,5 +2605,153 @@ int mode() { if (__ctfe) return 1; return 2; }
             const f = quiet(() => fresh.djsMain(["-c", "-o-", "-verrors=0", `-I${dir}`, file], () => true));
             expect(second.out).toBe(`${f.value}\n${f.out}`);
         }
+    });
+});
+
+const UA = `module ua;
+import ub;
+
+struct S {
+    int v;
+    int opApply(scope int delegate(ref int) dg) { return dg(v); }
+    S opBinary(string op : "+")(S o) const { return S(v + o.v); }
+    string toString() const { return "s"; }
+    void unusedMethod() {}
+}
+struct Dead { void m() {} }
+
+int helper() { return 1; }
+int deadHelper() { return deadHelper2(); }
+int deadHelper2() { return 2; }
+int recurse(int n) { return n > 0 ? recurse(n - 1) : 0; }
+
+T tmpl(T)(T x) { return x; }
+T deadTmpl(T)(T x) { return calledFromDeadTmpl(); }
+int calledFromDeadTmpl() { return 3; }
+struct Box(T) { T v; T get() { return v; } T unusedGet() { return v; } }
+
+class Base { void f() {} void g() {} }
+class Derived : Base { override void f() {} override void g() {} void own() {} }
+class Printed { override string toString() const { return "p"; } }
+interface I { void run(); }
+class Impl : I { void run() {} }
+class NeverMade { void x() {} }
+
+int ctfeOnly() { return 4; }
+enum fromCtfe = ctfeOnly();
+int mixinRuntime() { return 5; }
+int mixinCtfe() { return 6; }
+mixin("int mixinDeclared() { return 7; }");
+int traitsReached() { return 8; }
+int otherTarget() { return 9; }
+int testedOnly() { return 10; }
+version (none) int inactiveUser() { return otherTarget(); }
+unittest { assert(testedOnly() == 10); }
+extern (C) int cExported() { return 11; }
+extern (C) extern __gshared int foreignVar;
+int gvar;
+int deadGvar;
+immutable int constGvar = 12;
+
+void main() {
+    S s;
+    foreach (x; s) gvar += x;
+    S t = s + s;
+    gvar += helper() + tmpl(2) + fromCtfe;
+    Box!int b;
+    gvar += b.get();
+    Base x = new Derived;
+    x.f();
+    Object o = new Printed;
+    I i = new Impl;
+    i.run();
+    mixin("gvar += mixinRuntime();");
+    mixin("enum z = mixinCtfe();");
+    gvar += z + t.v;
+    gvar += __traits(getMember, ua, "traitsReached")();
+    void nestedUsed() { gvar++; }
+    void nestedUnused() {}
+    nestedUsed();
+    gvar += ubUsed() + constGvar;
+}
+`;
+
+const UB = `module ub;
+int ubUsed() { return 1; }
+int ubUnused() { return 2; }
+`;
+
+/** The unused declarations as `file:line:character kind name: why` (positions from 0), or the miss's reason. */
+function unused(): string[] {
+    const a = djs.queryUnused();
+    if (a.result === null)
+        return [`miss: ${a.reason}`];
+    return a.result.declarations.map((d) => `${d.file.slice(dir.length + 1)}:${d.range.start.line}:`
+        + `${d.range.start.character} ${d.kind} ${d.name}: ${d.why}`);
+}
+
+/** The expected line of `unused` for the declaration whose name is `token` in `text` (`file`). */
+function dead(file: string, text: string, token: string, kind: string, name: string, why: string, nth = 0): string {
+    const p = at(text, token, nth);
+    return `${file}:${p.line}:${p.character} ${kind} ${name}: ${why}`;
+}
+
+describe("unused code", () => {
+    test("what the program's main cannot reach, in the modules it compiles, the outermost declaration only", () => {
+        compile({ "ua.d": UA, "ub.d": UB }, "ua.d", true, ["-i"]);
+        expect(unused()).toEqual([
+            dead("ua.d", UA, "unusedMethod", "method", "ua.S.unusedMethod", "unreferenced"),
+            dead("ua.d", UA, "Dead", "struct", "ua.Dead", "unreferenced"),
+            dead("ua.d", UA, "deadHelper", "function", "ua.deadHelper", "unreferenced"),
+            dead("ua.d", UA, "deadHelper2() {", "function", "ua.deadHelper2", "only referenced from unreachable code"),
+            dead("ua.d", UA, "recurse", "function", "ua.recurse", "only self-referenced"),
+            dead("ua.d", UA, "deadTmpl", "template", "ua.deadTmpl", "unreferenced"),
+            dead("ua.d", UA, "calledFromDeadTmpl() {", "function", "ua.calledFromDeadTmpl",
+                "only referenced from unreachable code"),
+            dead("ua.d", UA, "unusedGet", "method", "ua.Box.unusedGet", "unreferenced"),
+            dead("ua.d", UA, "g() {}", "method", "ua.Base.g", "unreferenced"),
+            dead("ua.d", UA, "g() {}", "method", "ua.Derived.g", "unreferenced", 1),
+            dead("ua.d", UA, "own", "method", "ua.Derived.own", "unreferenced"),
+            dead("ua.d", UA, "NeverMade", "class", "ua.NeverMade", "unreferenced"),
+            dead("ua.d", UA, "deadGvar", "variable", "ua.deadGvar", "unreferenced"),
+            dead("ua.d", UA, "nestedUnused", "function", "ua.main.nestedUnused", "unreferenced"),
+            dead("ub.d", UB, "ubUnused", "function", "ub.ubUnused", "unreferenced"),
+        ]);
+    });
+
+    test("live: lowered calls, overrides, mixin and traits names, CTFE, other targets, tests, foreign linkage", () => {
+        compile({ "ua.d": UA, "ub.d": UB }, "ua.d", true, ["-i"]);
+        const names = unused().join("\n");
+        // opApply (foreach), opBinary (+), an uncalled toString of a live struct; Derived.f through Base.f, an
+        // Object.toString override, an interface's implementation; a string mixin's runtime call and its CTFE call,
+        // a member reached by __traits(getMember); a function called in CTFE only; names in a branch not compiled
+        // and in a unittest without -unittest; extern(C); a declaration a string mixin made, an `extern` variable (a
+        // declaration of a variable defined elsewhere) are not listed
+        for (const name of ["opApply", "opBinary", "S.toString", "Derived.f", "Printed", "run", "mixinRuntime",
+            "mixinCtfe", "mixinDeclared", "traitsReached", "ctfeOnly", "otherTarget", "testedOnly", "cExported",
+            "nestedUsed", "ubUsed", "constGvar", "foreignVar", "helper:", "tmpl:", "Box:", "Box.get"])
+            expect(names).not.toContain(name);
+        expect(djs.queryUnused().result!.entry).toBe("D main");
+    });
+
+    test("misses: a library (no main), a compile with errors", () => {
+        compile({ "ub.d": UB }, "ub.d", true);
+        expect(unused()).toEqual(["miss: the program has no entry: no module of the compile declares a main"]);
+        compile({ "ue.d": "module ue;\nvoid main() { nowhere(); }\n" }, "ue.d", true);
+        expect(unused()).toEqual(["miss: the last compile reported errors"]);
+    });
+
+    test("a query between two kept compiles: the second compile's output is a fresh compile's", async () => {
+        compile({ "ua.d": UA, "ub.d": UB }, "ua.d", true, ["-i"]);
+        expect(unused().length).toBeGreaterThan(0);
+        const edited = `${UA}int more() { return ubUnused() + deadHelper(); }\n`;
+        const second = compile({ "ua.d": edited }, "ua.d", true, ["-i"]);
+        expect(second.mode).toBe("kept");
+        expect(unused()).toContain(dead("ua.d", edited, "more", "function", "ua.more", "unreferenced"));
+        vi.resetModules();
+        const fresh = await import("./djs.js");
+        const args = ["-c", "-o-", "-verrors=0", "-i", `-I${dir}`, join(dir, "ua.d")];
+        const f = quiet(() => fresh.djsMain(args, () => true));
+        expect(second.out).toBe(`${f.value}\n${f.out}`);
     });
 });

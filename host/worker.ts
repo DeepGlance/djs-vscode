@@ -20,8 +20,8 @@
 // request one `queryImports` call, a completion request one `queryCompletion` call, a document-symbols request one
 // `queryDocumentSymbols` call, a references request one `queryReferences` call, a rename request one
 // `queryPrepareRename` call (no new name) or one `queryRename` call, a signature-help request one `querySignatureHelp`
-// call. A query that throws is answered
-// with its error as the reason, and the worker serves the next request.
+// call, an unused-code request one `queryUnused` call. A query that throws is answered with its error as the reason,
+// and the worker serves the next request.
 //
 // CONTRACT WITH THE CALLER (10 §4.7):
 // - every path in `args` is absolute: a worker cannot chdir (process.chdir throws in a worker), and the process's
@@ -42,7 +42,7 @@ import {
     SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, djsMainKept, queryAst, queryCompletion, queryDefinition,
     queryDocumentSymbols, queryExpansion, queryExpansionSites, queryHover, queryImports, queryInactiveRanges,
     queryInlayHints, queryInstances, queryPrepareRename, queryReferences, queryRename, querySemanticTokens,
-    querySignatureHelp, type KeptCompile,
+    querySignatureHelp, queryUnused, type KeptCompile,
 } from "../src/djs.js";
 import { setDiagnosticHandler, unescapeBackticks } from "../src/dmd/errors.js";
 import { OutBuffer } from "../src/dmd/common/outbuffer.js";
@@ -57,8 +57,7 @@ import type {
     ExpansionSitesReply, ExpansionSitesRequest, HoverReply, ImportsReply, ImportsRequest, InactiveRangesReply,
     InactiveRangesRequest, InlayHintsReply, InlayHintsRequest, InstancesReply, InstancesRequest, Position, QueryRequest,
     ReferencesReply, ReferencesRequest, RenameReply, RenameRequest, Request, ReadyMessage, SignatureHelpReply,
-    SignatureHelpRequest,
-    SemanticTokensReply, SemanticTokensRequest, Severity,
+    SignatureHelpRequest, SemanticTokensReply, SemanticTokensRequest, Severity, UnusedReply, UnusedRequest,
 } from "./protocol.js";
 
 const port = parentPort!;
@@ -452,6 +451,22 @@ function signatureHelp(req: SignatureHelpRequest): SignatureHelpReply {
     }
 }
 
+/**
+ * The unused code of the last compile's program (`queryUnused`); no request field to validate. An error the query
+ * throws becomes the reason.
+ */
+function unused(req: UnusedRequest): UnusedReply {
+    const t0 = performance.now();
+    const reply = (result: UnusedReply["result"], reason: string): UnusedReply =>
+        ({ kind: "unused", id: req.id, result, reason, ms: performance.now() - t0 });
+    try {
+        const a = queryUnused();
+        return a.result === null ? reply(null, a.reason) : reply(a.result, "");
+    } catch (e) {
+        return reply(null, internalError(e));
+    }
+}
+
 port.on("message", (req: Request) => {
     switch (req.kind) {
         case "compile": port.postMessage(compile(req)); break;
@@ -468,6 +483,7 @@ port.on("message", (req: Request) => {
         case "references": port.postMessage(references(req)); break;
         case "rename": port.postMessage(rename(req)); break;
         case "signatureHelp": port.postMessage(signatureHelp(req)); break;
+        case "unused": port.postMessage(unused(req)); break;
         default: port.postMessage(query(req));
     }
 });

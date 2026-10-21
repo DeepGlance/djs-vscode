@@ -4,7 +4,7 @@ D language support compiled by the D frontend itself. djs is the LDC 1.43.0 fron
 TypeScript; this extension runs it in a worker thread inside VS Code, so the diagnostics, hovers and completions are
 the compiler's own, for the flags and target of your build, with no D toolchain installed.
 
-**Preview.** Version 0.1.0 is the first release: expect rough edges, and report them.
+**Preview.** Expect rough edges, and report them.
 
 ![An error typed, a hover, a completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/demo.gif)
 
@@ -43,6 +43,10 @@ build's ldc2 command line in `djs.ldc2Line` (see [Settings](#settings)).
 - **Inlay hints**: the inferred type of `auto` variables and inferred return types, parameter names at call sites,
   how many instances a template has.
 - **Inactive code dimmed**: the `version`, `debug` and `static if` branches your target and flags do not compile.
+- **Unused code**: the declarations the program's `main` cannot reach (functions, methods, templates, aggregates,
+  enums, mutable globals) greyed out in the modules the compile analysed, for your target and flags, the reason on
+  hover; **djs: Show Unused Code** lists them. A name used in a branch not compiled or in a unittest keeps a
+  declaration; a compile with errors, or without a `main`, shows none.
 - **Expansion peeks**: code lenses over string mixins, template instances and folded values; a click (or
   **djs: Show Expansion** at the cursor) shows the generated D.
 - **AST view**: **djs: Show AST** prints the module as `-vcg-ast` does, beside the editor, with navigation back to
@@ -87,7 +91,7 @@ not model is shown as `djs: unsupported flag` in the status bar and the file is 
 
 The other settings switch single features on and off: `djs.compileOnPause` and `djs.compileOnPauseDelay`,
 `djs.semanticTokens`, `djs.inlayHints.types`, `.parameterNames`, `.instanceCounts`, `djs.dimInactiveCode` and
-`djs.inactiveCodeOpacity`, `djs.expansionLenses`.
+`djs.inactiveCodeOpacity`, `djs.expansionLenses`, `djs.unusedCode`.
 
 ## Restricted Mode
 

@@ -5,7 +5,7 @@ is the frontend of LDC 1.43.0 (DMD 2.113) ported to TypeScript; this extension r
 Code, so diagnostics, hovers, references and completions are the compiler's, for the flags and the target of your
 build, with no D toolchain installed.
 
-**Preview.** 0.1.0 is the first release: expect rough edges, and report them.
+**Preview.** Expect rough edges, and report them.
 
 ![An error typed, a hover, a completion after a dot](https://raw.githubusercontent.com/DeepGlance/djs-vscode/main/extension/media/demo.gif)
 
@@ -43,6 +43,8 @@ And without a picture:
 - **Signature help** with the overload the compiler picked first and the argument under the cursor.
 - **Inlay hints**: inferred types, parameter names at call sites, a template's instance count.
 - **Inactive branches dimmed**: the `version`, `debug` and `static if` branches your target and flags do not compile.
+- **Unused code greyed out**: the declarations the program's `main` cannot reach, for your target and flags, listed by
+  **djs: Show Unused Code**.
 - **Semantic highlighting** over code-d's TextMate grammar.
 - **Expansion peeks** of string mixins, template instances and folded values; **explorers** of template instances and
   of the import graph.

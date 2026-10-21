@@ -1,9 +1,9 @@
 // The VS Code side: diagnostics on save and on a pause in typing for D files, compiled by djs in a worker thread, and
 // hover, go-to-definition, the outline, the references, rename, signature help, completion (after a dot and of the
-// names in scope), semantic tokens, inlay hints, the dimming of inactive branches, expansion peeks, the AST view and
-// the instances and imports explorers on what the last compile analysed; the colours under them come from the
-// TextMate grammar (syntaxes/d.tmLanguage.json, code-d's) and the editing rules from language-configuration.json,
-// both declared in package.json.
+// names in scope), semantic tokens, inlay hints, the dimming of inactive branches, expansion peeks, the AST view, the
+// instances and imports explorers and the unused code on what the last compile analysed; the colours under them come
+// from the TextMate grammar (syntaxes/d.tmLanguage.json, code-d's) and the editing rules from
+// language-configuration.json, both declared in package.json.
 //
 // A CommonJS entry (VS Code's loader requires extensions); the host modules are ES modules, loaded by dynamic import.
 // Per repository, the setting `djs.ldc2Line` holds the ldc2 command of the repository's target (empty, the default:
@@ -127,6 +127,12 @@
 // of the compile inside a workspace folder; a title-bar toggle narrows them to the active editor's file). File names
 // are compared resolved: djs names druntime's files through the configuration's import path
 // (`.../bin/../import/object.d`).
+// Unused code (djs 10 §4.7, "Queries"; setting `djs.unusedCode`, default on): the declarations of the last compile's
+// program that its `main` cannot reach, in the modules that compile analysed, as hints of their own collection
+// (severity Hint, tagged Unnecessary: VS Code greys the identifier), asked once the compile queue empties after a
+// save's or an opening's compile (`refreshUnused`; a pause's compile leaves them, moved by VS Code with the edits);
+// a compile with errors or without a `main` clears them. Each message says `unused in this build`: the target and the
+// flags decide what is reached. The command djs.showUnused lists them in a quick pick. A worker that dies drops them.
 import vscode = require("vscode");
 import path = require("node:path");
 import url = require("node:url");
@@ -135,7 +141,7 @@ import type { DjsCompiler } from "../host/compiler.js";
 import type {
     CompileReply, CompletionKind, Diagnostic as DjsDiagnostic, DocumentSymbol as DjsDocumentSymbol, ExpansionSite,
     ImportModule, InlayHint as DjsInlayHint, InstanceSite, PackedAst, Position, Range, Severity, SymbolKindName,
-    TemplateInstances, TokenLegend,
+    TemplateInstances, TokenLegend, UnusedDeclaration,
 } from "../host/protocol.js";
 
 type HostModules = {
@@ -407,6 +413,8 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     } else {
         markHiddenAstViews();
     }
+    if (cause !== "pause" || afterDeath || unusedOwed)
+        unusedWanted = true;
     const k = reply.stats;
     channel.appendLine(`status ${reply.status}, ${reply.errors} errors, ${reply.warnings} warnings, `
         + `${reply.fatals} fatal stops, ${reply.wallMs.toFixed(0)} ms, ${cause}, root from ${source}, `
@@ -426,6 +434,10 @@ async function drain(): Promise<void> {
         }
     } finally {
         busy = false;
+        if (unusedWanted && unusedEnabled()) {
+            unusedWanted = false;
+            void refreshUnused();
+        }
         const waiters = idleWaiters;
         idleWaiters = [];
         for (const w of waiters)
@@ -563,6 +575,7 @@ function reportDeath(e: unknown): void {
     keptSites.clear();
     deaths++;
     deadAt = generation;
+    clearUnused(WORKER_DIED);
     for (const editor of vscode.window.visibleTextEditors)
         setDimmed(editor, []);
     hintsChanged.fire();
@@ -1714,6 +1727,91 @@ interface DjsApi {
  * none runs). A worker that cannot start is reported as a dead one, and the registration waits for the next compile
  * that returns.
  */
+// ── unused code ──
+
+/** The unused declarations' hints: a collection of their own, which a compile's diagnostics do not replace. */
+let unusedCollection: vscode.DiagnosticCollection;
+/** The last unused-code answer (for djs.showUnused): the declarations, or why there are none. */
+let lastUnused: { declarations: UnusedDeclaration[] } | { reason: string } = { reason: "no compile yet" };
+/** Counts the unused-code requests: an answer to an older one writes nothing. */
+let unusedAsked = 0;
+/** Whether a request was dropped since the last unused-code answer: a pause compile then asks too. */
+let unusedOwed = false;
+/** Whether a compile of the current drain asks for the unused code, once the queue is empty (`drain`). */
+let unusedWanted = false;
+
+function unusedEnabled(): boolean {
+    return vscode.workspace.getConfiguration("djs").get<boolean>("unusedCode", true);
+}
+
+/**
+ * Asks the worker for the unused code of the last compile's program (djs `queryUnused`) and replaces the hints with
+ * the answer: severity Hint, tagged Unnecessary (VS Code greys the identifier), one per declaration. Asked when the
+ * compile queue empties after a save's or an opening's compile (`drain`), not after a pause's: VS Code moves the hints
+ * with the edits meanwhile. Queued last in the worker, and dropped at its turn when a compile runs or waits (the query
+ * holds the worker ~0.5 s on a large program: a compile must not wait for a report it will replace) or a newer request
+ * was made; then the next compile that returns, a pause's too, asks again (`unusedOwed`). A miss (no `main`, a compile
+ * with errors) clears the hints and says why in the output channel.
+ */
+async function refreshUnused(): Promise<void> {
+    unusedOwed = true;
+    const asked = ++unusedAsked;
+    const r = await ask(() => compiler.unused(() => asked !== unusedAsked || busy || queued.size > 0
+        || !unusedEnabled()));
+    if (r === null || asked !== unusedAsked)
+        return;
+    unusedOwed = false;
+    unusedCollection.clear();
+    if (r.result === null) {
+        lastUnused = { reason: r.reason };
+        channel.appendLine(`unused code: none, ${r.reason} (${r.ms.toFixed(0)} ms)`);
+        return;
+    }
+    const byFile = new Map<string, vscode.Diagnostic[]>();
+    for (const d of r.result.declarations) {
+        // the compile's target and flags decide what is reached: the message says so
+        const v = new vscode.Diagnostic(range(d.range), `unused in this build: ${d.kind} ${d.name}, ${d.why}`,
+            vscode.DiagnosticSeverity.Hint);
+        v.tags = [vscode.DiagnosticTag.Unnecessary];
+        v.source = "djs";
+        const list = byFile.get(d.file) ?? [];
+        list.push(v);
+        byFile.set(d.file, list);
+    }
+    for (const [file, list] of byFile)
+        unusedCollection.set(vscode.Uri.file(file), list);
+    lastUnused = { declarations: r.result.declarations };
+    channel.appendLine(`unused code: ${r.result.declarations.length} declarations in ${byFile.size} files, from `
+        + `${r.result.entry} (${r.ms.toFixed(0)} ms)`);
+}
+
+/** Drops the hints and the list (a worker that died, the setting turned off). */
+function clearUnused(reason: string): void {
+    unusedAsked++;
+    unusedCollection.clear();
+    lastUnused = { reason };
+}
+
+/** The command djs.showUnused: the last answer's declarations in a quick pick, the one picked opened at its name. */
+async function showUnused(): Promise<void> {
+    if ("reason" in lastUnused) {
+        void vscode.window.showInformationMessage(`djs: no unused-code report: ${lastUnused.reason}`);
+        return;
+    }
+    if (lastUnused.declarations.length === 0) {
+        void vscode.window.showInformationMessage("djs: the last compile's program has no unused code");
+        return;
+    }
+    const items = lastUnused.declarations.map((d) => ({ label: d.name, description: `${d.kind}, ${d.why}`,
+        detail: `${vscode.workspace.asRelativePath(d.file)}:${d.range.start.line + 1}`, d }));
+    const pick = await vscode.window.showQuickPick(items, { title: `Unused code (${items.length})`,
+        matchOnDescription: true, matchOnDetail: true });
+    if (pick === undefined)
+        return;
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(pick.d.file));
+    await vscode.window.showTextDocument(doc, { selection: range(pick.d.range) });
+}
+
 async function registerTokens(): Promise<void> {
     let legend: TokenLegend;
     try {
@@ -1740,6 +1838,7 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
     };
     compiler = new host.compiler.DjsCompiler();
     collection = vscode.languages.createDiagnosticCollection("djs");
+    unusedCollection = vscode.languages.createDiagnosticCollection("djs-unused");
     channel = vscode.window.createOutputChannel("djs");
     status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
     status.text = "djs";
@@ -1750,8 +1849,8 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
     importsView = vscode.window.createTreeView("djs.imports", { treeDataProvider: importsProvider });
     onActiveEditor(vscode.window.activeTextEditor);
     void vscode.commands.executeCommand("setContext", "djs.active", true);
-    subscriptions.push(collection, channel, status, tokensChanged, hintsChanged, lensesChanged, astChanged,
-        instancesChanged, importsChanged, instancesView, importsView,
+    subscriptions.push(collection, unusedCollection, channel, status, tokensChanged, hintsChanged, lensesChanged,
+        astChanged, instancesChanged, importsChanged, instancesView, importsView,
         vscode.workspace.onDidSaveTextDocument(onSave),
         vscode.workspace.onDidChangeTextDocument(onChange),
         vscode.workspace.onDidOpenTextDocument(onOpen),
@@ -1776,6 +1875,7 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         vscode.languages.registerDefinitionProvider({ scheme: AST_SCHEME },
             { provideDefinition: provideAstDefinition }),
         vscode.commands.registerCommand("djs.showAst", showAst),
+        vscode.commands.registerCommand("djs.showUnused", showUnused),
         vscode.commands.registerCommand("djs.instancesCurrentFile", () => setInstancesFilter(true)),
         vscode.commands.registerCommand("djs.instancesAllFiles", () => setInstancesFilter(false)),
         vscode.window.onDidChangeActiveTextEditor(onActiveEditor),
@@ -1803,6 +1903,12 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
                 hintsChanged.fire();
             if (e.affectsConfiguration("djs.expansionLenses"))
                 lensesChanged.fire();
+            if (e.affectsConfiguration("djs.unusedCode")) {
+                if (unusedEnabled())
+                    void refreshUnused();
+                else
+                    clearUnused("djs.unusedCode is off");
+            }
             if (e.affectsConfiguration("djs.inactiveCodeOpacity")) {
                 dimType.dispose();
                 dimType = makeDimType();

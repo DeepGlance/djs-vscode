@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (preview)
 
+- `queryUnused`: the declarations the program's `main` cannot reach (functions, methods, templates, aggregates,
+  enums, mutable globals) in the D modules the last compile analysed, for its target and flags. A name used in a
+  branch not compiled or in a unittest not compiled keeps a declaration; a compile with errors or without a `main`
+  answers none.
+- Editor queries: the outline of a file (`queryDocumentSymbols`), the references of a symbol (`queryReferences`),
+  rename (`queryPrepareRename`, `queryRename`, refused where a use could be missed or the new name clashes),
+  signature help (`querySignatureHelp`), completion without a dot, the doc summary of the overload an operator or a
+  UFCS call takes; names in a function body with errors answered by position.
 - `-H`, `-Hd`, `-Hf`, `-Hkeep-all-bodies` (`.di` headers), `-mixin=` and `-deps[=<file>]` (also `--deps`): the
   frontend's own outputs, written as ldc2 writes them. `-edition[=NNNN[<file>]]`, `-noasm`; `-nogc` accepted (it acts
   only in code generation).
