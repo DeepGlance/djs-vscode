@@ -1406,6 +1406,23 @@ export class ScopeDsymbol extends Dsymbol {
     private privateAccessiblePackages: BitArray = new BitArray();
 
     /**
+     * The kept-module engine (src/keep.ts `keepPackageAccess`): the tags of the packages this scope's imports made
+     * accessible, publicly then privately, as one string, which compares a module's state after its importAll with a
+     * later one. Cost: one pass over both bitsets.
+     */
+    djsPackageAccess(): string {
+        const tags = (b: BitArray): string => {
+            const t: number[] = [];
+            for (let i = 0; i < b.length; i++) {
+                if (b.opIndex(i))
+                    t.push(i);
+            }
+            return t.join(",");
+        };
+        return `${tags(this.accessiblePackages)}/${tags(this.privateAccessiblePackages)}`;
+    }
+
+    /**
      * dmd/dsymbol.d:1137/:1142/:1147 — the three `final extern (D) this(...)` ctors collapsed by
      * ARITY (04 §1A Form A — the guide's canonical example is exactly this set):
      *   this()             -> new ScopeDsymbol()

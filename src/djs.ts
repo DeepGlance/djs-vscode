@@ -64,7 +64,7 @@ import { Module, getFilename } from "./dmd/dmodule.js";
 import { StructDeclaration } from "./dmd/dstruct.js";
 import { Dsymbol, PASS } from "./dmd/dsymbol.js";
 import {
-    addDeferredSemantic2, addDeferredSemantic3, resetDsymbolsemState, runDeferredSemantic,
+    addDeferredSemantic2, addDeferredSemantic3, deferredRetryNested, resetDsymbolsemState, runDeferredSemantic,
 } from "./dmd/dsymbolsem.js";
 import {
     TemplateAliasParameter, TemplateStats, TemplateTypeParameter, TemplateValueParameter,
@@ -1097,6 +1097,7 @@ keepBind({
     },
     addDeferred: (s, pass) => (pass === 2 ? addDeferredSemantic2 : addDeferredSemantic3)(s),
     runDeferredSemantic,
+    retryNested: deferredRetryNested,
     checkCompiledImport: (m) => {
         // dmd/dmodule.d:783-787, the parse's `checkCompiledImport`: under `-i`, `Compiler.onImport` pushes the module
         // on `compiledImports` and it becomes a root
@@ -1219,9 +1220,13 @@ export interface DjsOptions {
     texts?: ReadonlyMap<string, string>;
 }
 
-/** The kept state's key for `options` (`KeepHost.options`): `texts` is not part of it (see `DjsOptions`). */
-function optionsKey(options: DjsOptions): string {
-    return options.docComments === true ? "docComments" : "";
+/**
+ * The kept state's key for `options` and the mode of `onFatal` (`KeepHost.options`): `texts` is not part of it (see
+ * `DjsOptions`); editor mode is (any handler but `throwFatalError`, dmd/errors.ts `editorMode`), since the frontend's
+ * tests of the error count read otherwise there (`analysisSeesErrors`) and the units record what they read.
+ */
+function optionsKey(options: DjsOptions, onFatal: FatalErrorHandler): string {
+    return [options.docComments === true ? "docComments" : "", onFatal !== throwFatalError ? "editor" : ""].join(",");
 }
 
 /**
@@ -1264,9 +1269,9 @@ export {
     type InstanceSite, type InstancesAnswer, type InstancesResult, type QueryMiss, type QueryPosition, type QueryRange,
     type SemanticTokensAnswer, type SemanticTokensResult, type SymbolKindName, type TemplateInstances,
     type UnusedAnswer, type UnusedDeclaration, type UnusedKind, type UnusedResult, type UnusedWhy,
-    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, STALE_REASON, queryAst, queryCompletion, queryDefinition,
-    queryDocumentSymbols, queryExpansion, queryExpansionSites, queryPrepareRename, queryReferences, queryRename,
-    querySignatureHelp, queryUnused,
+    INACTIVE_REASON, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES, STALE_REASON, queryAst, queryCompletion,
+    queryDefinition, queryDocumentSymbols, queryExpansion, queryExpansionSites, queryPrepareRename, queryReferences,
+    queryRename, querySignatureHelp, queryUnused,
     queryHover, queryImports, queryInactiveRanges, queryInlayHints, queryInstances, querySemanticTokens,
 } from "./query.js";
 
@@ -1311,7 +1316,7 @@ export function djsMainKept(args: readonly string[], onFatal: FatalErrorHandler 
                 perCall(false);
             },
             run: () => cppmain(args),
-            options: optionsKey(options),
+            options: optionsKey(options, onFatal),
             crashed: (e) => !(e instanceof FatalError) && !(e instanceof UnsupportedFlag),
             escape: finishEscape,
             getHandler: () => diagnosticHandler,
@@ -1352,10 +1357,12 @@ function finishEscape(e: unknown): number {
  * the code that follows each call. Contract for that host (10 §4.7):
  * - the status is 0 when the compile reaches the end of `mars_tryMain` (dmd/main.d:930, `status = EXIT_SUCCESS`
  *   after the `fatal()` on `global.errors`): read `global.errors` (and `global.warnings`), never the status;
- * - the output up to the first fatal point is ldc2's; past it come diagnostics ldc2 never prints, with no oracle:
- *   a failed import reports "unable to read module" twice (its importAll and its semantic each load it), the
- *   error limit (`-verrors`, default 20) prints its line again after every further error unless the host passes
- *   `-verrors=0`;
+ * - the output up to the first error is ldc2's; past it there is no oracle: the frontend tests that skip analysis
+ *   when any error was reported read only the gagged errors of the open gag windows (dmd/errors.ts
+ *   `analysisSeesErrors`), so an error reported to the editor does not switch analysis off elsewhere, and past the
+ *   fatal points come diagnostics ldc2 never prints: a failed import reports "unable to read module" twice (its
+ *   importAll and its semantic each load it), the error limit (`-verrors`, default 20) prints its line again after
+ *   every further error unless the host passes `-verrors=0`;
  * - the args carry `-o-`: past a fatal point an object file would reach the codegen wall (an Internal error);
  * - a failed ImportC file, imported or on the command line (importc.h, the C compiler, its temporary directory, a C
  *   preprocessor that fails), stops at that `fatal()` as the CLI does: status 1, the CLI's output
@@ -1365,7 +1372,8 @@ function finishEscape(e: unknown): number {
  *   a D assert that LDC's release build compiles out stops with an AssertError (Internal error, status 1); a crash
  *   faithful to LDC, which segfaults at the same point, is an Internal error, status 1; an `LDC_intrinsic` name
  *   with a misplaced `#` loops without end, as LDC does.
- * The handler is called with no arguments; it may count the calls, and may throw `FatalError` to stop the compile.
+ * The handler is called with no arguments; it may count the calls, and may throw `FatalError` to stop the compile
+ * (any handler but `throwFatalError` is editor mode: up to its first `fatal()` such a compile analyses as the editor).
  * A handler answering false gives D's exit path (dmd/errors.d:823-825): `process.exit(1)` ends the host process.
  * A host answers true or throws `FatalError`.
  *

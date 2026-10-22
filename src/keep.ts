@@ -49,20 +49,27 @@
 // drops the tree's entries from it, and the use puts them back (`keepModuleAsPackage`). An aggregate's RTInfo made
 // outside every unit (the end-of-compile semantic3 of a library struct) is emptied before the next kept compile, whose
 // run instantiates `RTInfo!T` again (`keepRTInfo`).
-// In the next compile of the same command line, every kept unit's owner starts in the state its guard had
-// before the unit ran (its SHADOW state), so every caller that would run the unit in a fresh compile reaches the
-// guard again; there the first request REPLAYS the log instead of running the unit: each request event replays
-// the requested unit if it is not yet requested in this compile, each report calls the same reporting function
-// under the gag level the recording had relative to the unit's entry (so counters, limits, handlers and printing
-// follow fresh semantics), each trace calls `printInstantiationTrace` on the live instance, each counter delta is
-// added, each tree change and deferral is redone. A second request in the same compile does nothing, as in a
-// fresh compile. A replay checks what its log depends on: the gag at its entry (zero or not), an instance's
-// `gagged`, `-de`, the deferred symbols, a cycle entered from the other side, the generated-identifier counter;
-// where it differs and the unit prints something it would change, the compile aborts (ABORT). The deferred symbols
-// (Module.deferred) of a unit that retries them (runDeferredSemantic) and whose own work leaves them as they are
-// (every retry it ran did no work, and it deferred nothing itself: not F_DEFOWN) may differ: its log holds nothing of
-// the symbols retried, and the replay retries this compile's ones at its end, where a retry that does no work proves
-// that a fresh compile's retries inside the unit did none (`probeRetry`).
+// In the next compile of the same command line, every kept unit's owner starts in the state its guard had before the
+// unit ran (its SHADOW state), so every caller that would run the unit in a fresh compile reaches the guard again;
+// there the first request REPLAYS the log instead of running the unit: each request event replays the requested unit if
+// it is not yet requested in this compile, each report calls the same reporting function under the gag level the
+// recording had relative to the unit's entry (so counters, limits, handlers and printing follow fresh semantics), each
+// trace calls `printInstantiationTrace` on the live instance, each counter delta is added, each tree change and
+// deferral is redone. A second request in the same compile does nothing, as in a fresh compile. A replay checks what
+// its log depends on: the gag at its entry (zero or not), an instance's `gagged`, `-de`, the deferred symbols, a cycle
+// entered from the other side, the generated-identifier counter; where it differs and the unit prints something it
+// would change, the compile aborts (ABORT). It aborts, whatever the unit prints, where gagged errors are counted at its
+// entry and were not at its recording, or the reverse, when it read a test of the error count by them (dmd/errors.ts
+// `analysisSeesErrors`, `keepReadErrors`); before each request made inside a gag window the unit opened, the replay
+// puts back the gagged errors the window held when recorded (`enterWindow`). The deferred symbols (Module.deferred) of
+// a unit that retries them (runDeferredSemantic) and whose own work leaves them as they are (every retry it ran did no
+// work, and it deferred nothing itself: not F_DEFOWN) may differ: its log holds nothing of the symbols retried, and the
+// replay retries this compile's ones at its end, where a retry that does no work proves that a fresh compile's retries
+// inside the unit did none (`probeRetry`). Whether a unit runs inside a retry (dmd/dsymbolsem.d:762, where its own
+// retries return at once) is a replay condition both ways (`UnitRec.nested`): F_DEFOWN, replayed in the other state,
+// aborts; recorded inside one and replayed outside one with deferred symbols or symbols it defers, it probes.
+// A list so proved, and the recorded one, are remembered with the unit, and a later replay entered with one of them
+// holds without the retry (`prove`: an import dropped and added again).
 // Template instances get CREATION EMULATION: a kept instance's first request in a compile sets its creation
 // fields from that request (loc, tinst, minst, gagged, the members' scope minst), appends it to its module as the
 // creation path does, and replays its creation log; for a live request the rest of the creation path
@@ -79,22 +86,23 @@
 // read the clock, the containers whose symbol a unit of another container marked with errors (a fresh compile starts
 // without the mark), the units whose string imports now find another file or other bytes, whose failed module imports
 // now find a module, that read the clock, or the working directory when it changed, that reported an error ungagged,
-// that skipped analysis on errors reported ungagged before them (`keepErrorState`: a test of `global.errors`), the
-// containers of the structs whose constructor search another container's analysis skipped so, that reported a location
-// in a dead file, and, to a fixpoint, every unit that requested a dead unit (a dead unit kills
-// its whole owner module or instance: an analysed body cannot be un-analysed), every instance over a dead symbol
-// (template, enclosing scope, argument), every AA TypeInfo declaration over one (key and value types, object.d's
-// TypeInfo_AssociativeArray) or whose semantic3 ran from a dead scope (the requesting code's module, instance and root
-// module: the scope must not keep them alive), every unit entered from a dead module's scope (`callsc`), every module
-// whose analysis took the C types of a dead module (`keepMergeFound`: they are the dead module's declarations), every
-// module whose C types a dead module's analysis read before their size was final (the kept declarations hold the final
-// field lists), the instances no kept unit requests and no recent compile did, and the instances being matched that
-// hold a unit (`F_EARLY`) no kept unit requests; then every AA TypeInfo declaration whose type left the table through
-// an entry a dead unit created (`keepType`). Dead objects leave the engine, the instance tables, the type table (with
-// the entries of `keepType`), the Loc file table, the generated-name counters and the CTFE global values; a dead AA
-// TypeInfo declaration whose type stays in the table is not replaced, its semantic3 runs for real again on it. A C
-// module whose preprocessor writes anything makes the compile fresh: a fresh compile's run writes it to the inherited
-// stderr.
+// that skipped analysis on errors reported ungagged before them (`keepErrorState`: a test of the error count, in the
+// CLI; in editor mode such a test reads only gagged errors), the containers of the structs whose constructor search
+// another container's analysis skipped on errors (in editor mode, gagged ones), that reported a location in a dead
+// file, and, to a fixpoint, every unit that requested a dead unit (a dead unit kills its whole owner module or
+// instance: an analysed body cannot be un-analysed), every instance over a dead symbol (template, enclosing scope,
+// argument), every AA TypeInfo declaration over one (key and value types, object.d's TypeInfo_AssociativeArray) or
+// whose semantic3 ran from a dead scope (the requesting code's module, instance and root module: the scope must not
+// keep them alive), every unit entered from a dead module's scope (`callsc`), every module whose analysis took the C
+// types of a dead module (`keepMergeFound`: they are the dead module's declarations), every module whose C types a dead
+// module's analysis read before their size was final (the kept declarations hold the final field lists), every module
+// whose own member a dead container's unit found before the module's semantic1 (`peeks`: that use analysed the member),
+// the instances no kept unit requests and no recent compile did, and the instances being matched that hold a unit
+// (`F_EARLY`) no kept unit requests; then every AA TypeInfo declaration whose type left the table through an entry a
+// dead unit created (`keepType`). Dead objects leave the engine, the instance tables, the type table (with the entries
+// of `keepType`), the Loc file table, the generated-name counters and the CTFE global values; a dead AA TypeInfo
+// declaration whose type stays in the table is not replaced, its semantic3 runs for real again on it. A C module whose
+// preprocessor writes anything makes the compile fresh: a fresh compile's run writes it to the inherited stderr.
 //
 // ABORT. A kept compile buffers stdout, stderr and the diagnostic handler's calls and releases them at its end. Any
 // invariant violation found while replaying (see above; also a request of an instance's semantic2/3 or of a deferral of
@@ -107,8 +115,10 @@
 // unit that finalized it has not yet run or replayed in this compile, or no unit finalized, a module tree conflict, a
 // kept module used as a package whose symbol table is not a fresh compile's there, or whose importAll replays without
 // the use that made its table (`keepModuleAsPackage`), a request of an AA TypeInfo declaration not kept or first
-// requested without a scope, or of its semantic3 from a unit, a lookup into a kept module before its semantic, a new
-// module named as a kept one, a C preprocessor run that writes) throws `KeepAbort`, and so does any crash in a kept
+// requested without a scope, or of its semantic3 from a unit, a lookup into a kept module before its semantic that
+// finds its own member or a symbol through imports its semantic changed (`keepFound`, `keepImportFound`), a package
+// access check through such a module whose imports or package access are not its importAll's (`keepPackageAccess`), a
+// new module named as a kept one, a C preprocessor run that writes) throws `KeepAbort`, and so does any crash in a kept
 // compile: `keepCompile` drops the kept state and compiles fresh, reporting the reason. Two differences go on on
 // purpose, since they change nothing printed: a request found in another state than recorded (an import cycle entered
 // from the other side) where neither unit nor what it requests prints, which then goes as a fresh compile's (the
@@ -219,6 +229,8 @@ export interface KeepBindings {
     addDeferred(s: Dsymbol, pass: 2 | 3): void;
     /** dmd/dsymbolsem.d:760 `runDeferredSemantic`, the retry a replay runs where its unit retried (`probeRetry`). */
     runDeferredSemantic(): void;
+    /** dmd/dsymbolsem.d:762 `runDeferredSemantic`'s `nested`: above zero inside a retry (a nested one returns). */
+    retryNested(): number;
     /**
      * dmd/dmodule.d:783-787 `checkCompiledImport`, which a parse runs: under `-i` a module the patterns include is
      * pushed on `compiledImports` (dmd/compiler.d:140-153) and becomes a root (`importedFrom` is itself).
@@ -289,6 +301,8 @@ interface UnitRec {
     log: unknown[];
     flags: number;
     e: number;              // global.gag at entry
+    ge: boolean;            // gagged errors of open windows at entry (global.windowErrors !== 0), see `replayUnit`
+    reads: boolean;         // a test of the error count read the entry's window state (`keepReadErrors`)
     gagged: boolean;        // the owner instance's `gagged` at entry (instance units)
     dep: number;            // global.params.useDeprecated at entry
     pre: number;            // the owner's guard value before the unit (semanticRun)
@@ -298,6 +312,9 @@ interface UnitRec {
     defIn: Dsymbol[] | null;    // Module.deferred at entry (F_DEFERS units; null: empty), or at the last replay
                                 // that found other ones (`probeRetry`)
     defOut: Dsymbol[] | null;   // ... and at exit
+    nested: boolean;        // entered inside a retry of the deferred symbols, where its own retries returned at once
+    proved: (Dsymbol[] | null)[] | null;    // other entry lists a replay held under, its exit list equal to its entry
+                                            // (`probeRetry`; at most PROVED_LISTS, the most recent last)
     c0: number;             // the generated-identifier counter at entry (`newSuffix`)
     ids: GenId[];           // the generated identifiers it made, numbered from `c0` (`keepGenerated`), in the order
                             // of the log's OP_CNT segments
@@ -337,6 +354,8 @@ interface ModRec {
     size: number;                       // -1: read from a host's text override (`Module.djsTextOf`)
     mtime: number;
     baseLen: number;                    // members after importAll: the parsed members (+ `import object`)
+    imports: number[];                  // the visibility of each imported scope after importAll (`importMoved`)
+    access: string;                     // the packages its imports made accessible after importAll
     scope: unknown;                     // `_scope` as its importAll unit's run left it, restored by its replay
     regGen: number;                     // the compile that registered it
     statics: Map<number, Dsymbol>;      // the object.d statics it set (`objectStatics` index -> value)
@@ -354,19 +373,39 @@ interface Frame {
     u: UnitRec | null;      // null for a tail frame
     replay: boolean;
     win: number;            // gag windows opened inside the unit and not closed
+    winErrs: number;        // global.windowErrors when the outermost of them opened (`keepWin`)
+    entryErrs: number;      // global.windowErrors at entry (`keepReadErrors`)
     seen: Set<unknown> | null;
     locs: Set<Type> | null; // the AA type table entries whose merge the log has recorded (`aaLoc`)
     ids: GenId[];           // the generated identifiers made since the last event (`keepGenerated`)
     idsAt: number;          // ... numbered from this counter value
-    def: Dsymbol[] | null;  // Module.deferred as this unit's log last knew it
+    def: Dsymbol[] | null;  // Module.deferred as this unit's log last knew it (`logEvent`, `learnDeferred`)
     errs: number;           // global.errors at entry (`keepErrorState`)
     retries: number;        // retries of the deferred symbols this unit runs now (`keepRetry`)
+    nested: boolean;        // a replay: inside a retry of the deferred symbols where its log was recorded (`nestedNow`)
 }
 
 function newFrame(u: UnitRec | null, replay: boolean): Frame {
-    return { u, replay, win: 0, seen: null, locs: null, ids: [], idsAt: 0, def: u === null ? null : u.defIn,
-        errs: B!.global.errors, retries: 0 };
+    return { u, replay, win: 0, winErrs: 0, entryErrs: B!.global.windowErrors, seen: null, locs: null, ids: [],
+        idsAt: 0, def: u === null ? null : u.defIn, errs: B!.global.errors, retries: 0, nested: false };
 }
+
+/**
+ * Whether the code running now is inside a retry of the deferred symbols (dmd/dsymbolsem.d:762 `nested`), where a retry
+ * returns at once: the frontend's own state, or, under a replay, the state its log was recorded in (a replay runs no
+ * retry, so the requests a recorded retry made replay outside one). Read by the recording (`UnitRec.nested`, the
+ * request events) and by `replayUnit`.
+ */
+function nestedNow(): boolean {
+    for (let k = stack.length - 1; k >= 0; k--) {
+        if (stack[k]!.replay)
+            return stack[k]!.nested || B!.retryNested() > 0;
+    }
+    return B!.retryNested() > 0;
+}
+
+/** The outer-retry state the replayed log recorded at the request replayed now (OP_REQ, OP_REQI), for `replayUnit`. */
+let requestNested: boolean | null = null;
 
 const unitsOf = new Map<object, (UnitRec | undefined)[]>();
 /**
@@ -431,6 +470,11 @@ const errorCached = new Set<Container>();
  * its size was final (`keepMergeFound`).
  */
 const cShares: { m: Module; w: Module; early: boolean }[] = [];
+/**
+ * The modules whose own member a unit of another container found before the module's semantic1 started, with those
+ * containers (`keepFound`): the member, unanalysed then, was analysed by the finder's use (THE DEAD SET).
+ */
+const peeks = new Map<Module, Set<Container>>();
 /** The AA types' TypeInfo declarations (dmd/typinf.d:185), by their naked type (`keepTypeInfoDecl`). */
 const tinfos = new Map<Type, TypeInfoDeclaration>();
 /** The type table entries whose `vtinfo` is one of them (`keepTypeInfo`), emptied before each kept compile. */
@@ -620,6 +664,7 @@ export function dropKeptState(): void {
     keptNames.clear();
     deferredSyms.clear();
     cShares.length = 0;
+    peeks.clear();
     errorMarked.clear();
     errorCached.clear();
     tinfos.clear();
@@ -1147,6 +1192,14 @@ function computeDeadSet(roots: readonly string[]): string | null {
                 work.push(w);
             }
         }
+        // the modules whose own member a dead container's unit found before their semantic1: its use analysed the
+        // member, which the kept module would hold analysed where the finder's live run looks it up again
+        for (const [m, finders] of peeks) {
+            if (!dead.has(m) && [...finders].some((c) => dead.has(c))) {
+                dead.add(m);
+                work.push(m);
+            }
+        }
         for (const [c, ms] of callMods) {
             if (dead.has(c))
                 continue;
@@ -1215,6 +1268,11 @@ function computeDeadSet(roots: readonly string[]): string | null {
     for (const ti of instances) {
         if (!dead.has(ti) && unitsOf.has(ti))
             stats.instancesKept++;
+    }
+    // a dead module's finders are made again by the lookups of its new analysis (a dead finder kills the module)
+    for (const m of peeks.keys()) {
+        if (dead.has(m))
+            peeks.delete(m);
     }
     // a pair with a dead module is made again by the merge of a new analysis
     for (let i = cShares.length - 1; i >= 0; i--) {
@@ -1399,7 +1457,10 @@ function keepPrepare(): void {
         // the instances this module's members got by appendToModuleMember (dmd/templatesem.d:1745) come back as this
         // compile creates them, and so do the members a unit's analysis appended (`keepAppend`: the `mixin _d_cmain!()`
         // of a D `main`), where the replay of that unit's log appends them, among the instances as a fresh compile
-        // appends them; one appended outside every recording unit stays, in order
+        // appends them; one appended outside every recording unit stays, in order. An appended mixin's passes 2 and 3
+        // ran in the module passes' tails (`keepMember`), outside every unit: its guard goes back to its first pass
+        // done, which its kept members hold, so this compile's tails run them again and request its functions' kept
+        // units (C `main`'s semantic3, which names `_Dmain`), whose guards are back to their shadow state
         const ms = m.members;
         if (ms !== null && ms.length > r.baseLen) {
             let n = r.baseLen;
@@ -1408,6 +1469,8 @@ function keepPrepare(): void {
                 const ti = s.isTemplateInstance();
                 if ((ti === null || ti.isTemplateMixin() !== null) && !appendLogged.has(s))
                     ms.opIndexAssign(s, n++);
+                else if (ti !== null && ti.isTemplateMixin() !== null && s.semanticRun > b.PASS.semanticdone)
+                    s.semanticRun = b.PASS.semanticdone;
             }
             ms.setDim(n);
         }
@@ -1550,6 +1613,7 @@ function keepEnd(outcome: "ok" | "abort" | "unclean", args: readonly string[], h
         stateOptions = host.options;
         stateCwd = process.cwd();
         rememberStatics();
+        dropStaleProofs();
     }
     if (buf !== null && outcome !== "abort") {
         for (const e of buf) {
@@ -1568,8 +1632,8 @@ function keepEnd(outcome: "ok" | "abort" | "unclean", args: readonly string[], h
 
 function opLength(op: number): number {
     switch (op) {
-        case OP_REQ: return 5;          // unit, gag, inProgress, inWindow
-        case OP_REQI: return 9;         // unit, gag, inProgress, inWindow, loc, tinst, minst-spec, creates
+        case OP_REQ: return 6;          // unit, gag, inProgress, window state (`windowState`), nested (`nestedNow`)
+        case OP_REQI: return 10;        // unit, gag, inProgress, window state, loc, tinst, minst-spec, creates, nested
         case OP_REP: return 10;         // gag, inWindow, supplemental, loc, format, ap, kind, p1, p2
         case OP_TRACE: return 5;        // gag, ti, cl, maxShown
         case OP_CNT: return 3;          // n, the counter where the segment started
@@ -1685,17 +1749,18 @@ function logRequest(v: UnitRec, starting = false): void {
     if (f.seen.has(v))
         return;
     f.seen.add(v);
-    logEvent(OP_REQ, v, B!.global.gag, !starting && stateOf(v) === 1, f.win !== 0);
+    logEvent(OP_REQ, v, B!.global.gag, !starting && stateOf(v) === 1, windowState(f), nestedNow());
     v.deps.add(f.u!);
 }
 
 function newUnit(owner: object, kind: KeepUnit, pre: number): UnitRec {
     const g = B!.global;
     const u: UnitRec = {
-        owner, kind, log: [], flags: 0, e: g.gag,
+        owner, kind, log: [], flags: 0, e: g.gag, ge: g.windowErrors !== 0, reads: false,
         gagged: (owner as { gagged?: boolean }).gagged ?? false,
         dep: g.params.useDeprecated, pre, post: pre, errPre: errFlags(owner), errPost: 0,
-        defIn: deferredNow(), defOut: null, c0: B!.suffixCounter(), ids: [], born: compileNo,
+        defIn: deferredNow(), defOut: null, nested: nestedNow(), proved: null, c0: B!.suffixCounter(),
+        ids: [], born: compileNo,
         infers: kind === KeepUnit.fsem3 && (owner as FuncDeclaration).inferRetType
             && ((owner as FuncDeclaration).type as TypeNext | null)?.next === null,
         gen: compileNo, st: 1,
@@ -1798,18 +1863,19 @@ export function keepRetried(m: RetryMark): void {
 }
 
 /**
- * Hook of a frontend test that reads whether any error was reported (`global.errors`) and skips analysis when one was,
- * called where the test reads a count above zero and the analysis it skips had a result: dmd/clone.d:1688 (no copy or
- * move constructor is looked for, so none is generated, the postblit's deprecation is not printed and `isPOD` caches
- * its answer in the struct `s`; clone.ts `keptCtorsSkipped`) and dmd/typesem.d:4405 (a `__traits` that gives no type is
- * not reported; `s` null). When the count comes from errors reported ungagged before the running unit (none of its own,
- * none gagged in an open window, which a replay of the enclosing units reproduces), the unit's result holds only in a
- * compile with such errors: it is marked F_ERRSTATE and the next compile drops it (THE DEAD SET), as an ungagged error
- * of its own would. When another container's unit, or work outside every unit, analysed `s` (`isPOD` on a library
- * struct), the next compile drops `s`'s container instead, whatever errors the count holds: its cache answers every
- * later compile. The reverse, a unit recorded where the count was zero and replayed after an error, is a known
- * divergence (10 §4.7), and so are the other tests of the count (the deferred semantic2/semantic3 loops,
- * dmd/dsymbolsem.d:819 and :837; dmd/templatesem.d:3001), which no reproducer shows changing a kept unit.
+ * Hook of a frontend test that reads whether any error was reported and skips analysis when one was (dmd/errors.ts
+ * `analysisSeesErrors`: `global.errors` in the CLI, the gagged errors of the open windows in editor mode), called where
+ * the test reads errors and the analysis it skips had a result: dmd/clone.d:1688 (no copy or move constructor is
+ * looked for, so none is generated, the postblit's deprecation is not printed and `isPOD` caches its answer in the
+ * struct `s`; clone.ts `keptCtorsSkipped`) and dmd/typesem.d:4405 (a `__traits` that gives no type is not reported;
+ * `s` null). When the count comes from errors reported ungagged before the running unit (none of its own, none gagged
+ * in an open window, which a replay of the enclosing units reproduces), the unit's result holds only in a compile with
+ * such errors: it is marked F_ERRSTATE and the next compile drops it (THE DEAD SET), as an ungagged error of its own
+ * would; only the CLI gets there, editor mode's tests read no ungagged error. When another container's unit, or work
+ * outside every unit, analysed `s` (`isPOD` on a library struct), the next compile drops `s`'s container instead,
+ * whatever errors the count holds, in either mode: its cache answers every later compile. The reverse, a unit recorded
+ * where the count was zero and replayed after an ungagged error, is a known divergence of the CLI's kept compiles
+ * (10 §4.7); gagged errors at a unit's entry other than recorded abort its replay (`replayUnit`).
  */
 export function keepErrorState(s: Dsymbol | null): void {
     const f = recFrame();
@@ -1817,7 +1883,7 @@ export function keepErrorState(s: Dsymbol | null): void {
     const c = s === null ? null : containerOf(s);
     if (c !== null && (f === null || unitContainer(f.u!) !== c))
         errorCached.add(c);
-    else if (f !== null && g.errors <= f.errs && g.gaggedErrors === 0)
+    else if (f !== null && g.errors <= f.errs && g.windowErrors === 0)
         f.u!.flags |= F_ERRSTATE;
 }
 
@@ -1871,6 +1937,8 @@ function closeFrame(f: Frame): void {
         const r = mods.get(o as unknown as Module);
         if (r !== undefined) {
             r.baseLen = (o as unknown as Module).members?.length ?? 0;
+            r.imports = [...(o as unknown as Module).visibilities ?? []];
+            r.access = (o as unknown as Module).djsPackageAccess();
             r.scope = (o as unknown as Module)._scope;
         }
     }
@@ -1883,8 +1951,31 @@ export function keepMark(): number {
 
 /** Closes the frames a visitor opened under the dispatch call that took `mark`. */
 export function keepUnwind(mark: number): void {
-    while (stack.length > mark)
+    while (stack.length > mark) {
         closeFrame(stack.pop()!);
+        learnDeferred();
+    }
+}
+
+/**
+ * Called where a requested unit that ran returns into the frame now on top (`keepUnwind`, `keepInstClose`): the
+ * recording frame learns the deferred symbols (Module.deferred) the unit left, which are those the replay of its log
+ * leaves there. A change the frame's own work makes before its next request is then logged with that request
+ * (`logEvent`): a struct an instance's creation deferred, which the module's retry after the member completes
+ * (dmd/dsymbolsem.d:3872), leaves the list as the frame knew it before the request, and a `def` not refreshed would log
+ * nothing where the replay restores the instance's exit list. Not after a replayed request: a kept unit that leaves
+ * other deferred symbols than it found deferred a kept struct while that struct's analysis was in progress, which a
+ * live frame reaches only through a lookup into the struct's module before its semantic, which the engine refuses.
+ * A unit that left other symbols than the frame knew changed them as part of the frame's work (F_DEFOWN): its replay
+ * restores them, but where the frame replays inside a retry of the deferred symbols and was recorded outside one, or
+ * the reverse, the unit's own retries ran otherwise (`replayUnit`), so the frame replays only in its recorded state.
+ */
+function learnDeferred(): void {
+    const f = recFrame();
+    if (f === null || sameDeferred(f.def))
+        return;
+    f.def = deferredNow();
+    f.u!.flags |= F_DEFOWN;
 }
 
 // ── the unit hooks ─────────────────────────────────────────────────────────────────────────────────────────
@@ -2008,8 +2099,10 @@ export function keepInstOpen(ti: TemplateInstance): void {
 /** Hook after the members' semantic1 of a new instance (dmd/templatesem.d:1308-1325): closes the creation frame. */
 export function keepInstClose(ti: TemplateInstance): void {
     const f = stack[stack.length - 1];
-    if (f !== undefined && f.u !== null && f.u.owner === ti && f.u.kind === KeepUnit.inst)
+    if (f !== undefined && f.u !== null && f.u.owner === ti && f.u.kind === KeepUnit.inst) {
         closeFrame(stack.pop()!);
+        learnDeferred();
+    }
 }
 
 /**
@@ -2042,8 +2135,8 @@ function logInstRequest(u: UnitRec, ti: TemplateInstance, loc: Loc, tinst: Templ
         : minst.isRoot() ? MINST_ROOT : minst;
     // `creates`: the request creates the instance (a new one, or a kept one not yet created in this compile, which
     // `keepInstMatch` then creates), and not a match of one created earlier
-    logEvent(OP_REQI, u, g, !starting && stateOf(u) === 1, f.win !== 0, loc, tinst, spec,
-        starting || stateOf(u) === 0);
+    logEvent(OP_REQI, u, g, !starting && stateOf(u) === 1, windowState(f), loc, tinst, spec,
+        starting || stateOf(u) === 0, nestedNow());
     u.deps.add(f.u!);
 }
 
@@ -2189,8 +2282,35 @@ export function keepDeferSemantic3(ti: TemplateInstance): void {
 /** Hook of `startGagging` (+1) and `endGagging` (-1) (dmd/globals.d:467/:481): the unit's own gag windows. */
 export function keepWin(d: number): void {
     const f = recFrame();
-    if (f !== null)
-        f.win += d;
+    if (f === null)
+        return;
+    if (d > 0 && f.win === 0)
+        f.winErrs = B!.global.windowErrors;
+    f.win += d;
+}
+
+/**
+ * Hook of the frontend tests of the error count (dmd/errors.ts `analysisSeesErrors`), called where the answer can
+ * change what the unit does: dmd/clone.d:1688 on a struct whose search may set a flag (clone.ts `keptCtorsSkipped`),
+ * the deferred semantic2/semantic3 loops (dmd/dsymbolsem.d:819, :837) with entries left, dmd/templatesem.d:3001 under
+ * gag, dmd/typesem.d:4405. When the gag windows the running unit opened itself hold no gagged error, the answer came
+ * from the windows open at its entry (`UnitRec.ge`), which a replay elsewhere may not have (`replayUnit`). Not a flag:
+ * a retry of the deferred symbols compares the flags (`keepRetried`).
+ */
+export function keepReadErrors(): void {
+    const f = recFrame();
+    if (f !== null && B!.global.windowErrors === f.entryErrs)
+        f.u!.reads = true;
+}
+
+/**
+ * What a request event logs of the gag windows the running unit opened (frame `f`): -1 outside them; inside, the
+ * gagged errors they hold (`Global.windowErrors` counted since the outermost opened). The replay ends those windows
+ * after each event (`endWindow`), so before a request it puts these errors back: the requested unit then reads at its
+ * entry, and in its own tests of the error count, what it read when recorded (`replayUnit`).
+ */
+function windowState(f: Frame): number {
+    return f.win !== 0 ? B!.global.windowErrors - f.winErrs : -1;
 }
 
 /**
@@ -2673,19 +2793,90 @@ function sharesWrong(): string | null {
 }
 
 /**
- * Hook of `Module.search` (dmd/dsymbolsem.d:8035): a live lookup into a kept module whose semantic1 has not been
- * replayed in this compile would see its analysed symbols where a fresh compile sees them unanalysed.
+ * Lookups before a module's semantic1. A fresh compile searches a module before its semantic1 where its importAll made
+ * it searchable and the code that looks comes first (an `import` declared after the members that use it); what it finds
+ * there is unanalysed, and its first use analyses it, with the visibility it was declared with, which its semantic sets
+ * (dmd/dsymbolsem.d:2124; until then `undefined`, which every visibility test passes: a private selective import's
+ * alias is taken, and `toAlias` runs its import's semantic there, dmd/dsymbolsem.d:1499-1504). A live lookup into a
+ * kept module whose semantic1 has not replayed in this compile aborts where what it finds differs from a fresh
+ * compile's: an own member of the module, analysed in the kept state (`keepFound`), or a symbol through an imported
+ * scope the module's semantic1 added, or whose visibility it raised (`keepImportFound`, by the scope it came from:
+ * `importMoved`), which a fresh compile's search does not see yet. A search that finds nothing is a fresh compile's:
+ * the kept module's tables hold what a fresh compile's hold there, and more, and a miss changes nothing but the search
+ * cache, emptied before each kept compile. A unit of another container that finds an own member of a module whose
+ * semantic1 has not started (a live lookup, in a kept or a fresh compile) is remembered as its finder (`peeks`): when
+ * the finder's container is dead, the next plan drops the module too (THE DEAD SET), so that the finder's live run
+ * finds the member unanalysed, as a fresh compile does; a symbol found through a module's imports is recorded for the
+ * module that holds it, except where an intermediate module's search cache answers (no finder then: the next compile's
+ * caches start empty, so that lookup reaches the holder's search and its check). The abort stays for the lookups no
+ * recording saw (new code in an edited root).
  */
-export function keepSearch(m: Module): void {
-    if (!kept)
+
+/** Hook of the Module search visitor (dmd/dsymbolsem.d:8035) where the search of `m` for `ident` found `found`. */
+export function keepFound(m: Module, ident: Identifier, found: Dsymbol): void {
+    if (m.symtab?.lookup(ident) === found)
+        foundOwn(m, found);
+}
+
+/**
+ * Hook of ScopeDsymbol's import loop (dmd/dsymbolsem.d:7646) where the search of the `i`th imported scope of `sds`
+ * found `found`, before the loop's visibility test, which reads what the members' semantic set: `sds` is searched
+ * before its semantic1 where a kept `sds`'s scope `i` is not its importAll's.
+ */
+export function keepImportFound(sds: Dsymbol, i: number, found: Dsymbol): void {
+    const m = sds.isModule();
+    if (m !== null && pendingKept(m) && importMoved(m, i))
+        throw new KeepAbort(`lookup into ${describe(m)} before its semantic finds ${describe(found)}`);
+}
+
+/**
+ * Hook of Module.isPackageAccessible (dmd/dmodule.d:970, from dmd/access.d:243, the check of a package-qualified name
+ * such as `pk.b.X`, which no search's import loop judges): it reads the module's accessible packages and its imported
+ * scopes' visibilities, which a kept module whose semantic1 has not replayed holds as that semantic left them. Where
+ * they are not its importAll's (a `static if` import that added package access, or a scope `importMoved`), the
+ * compile aborts: a fresh compile's check there reads the importAll's.
+ */
+export function keepPackageAccess(m: Module): void {
+    if (!pendingKept(m))
         return;
+    const r = mods.get(m)!;
+    if (m.djsPackageAccess() !== r.access || (m.visibilities ?? []).some((_, i) => importMoved(m, i)))
+        throw new KeepAbort(`package access through ${describe(m)} before its semantic`);
+}
+
+/** A lookup found `found`, an own member of module `m`: the abort, then the finder's record (see `keepFound`). */
+function foundOwn(m: Module, found: Dsymbol): void {
+    if (pendingKept(m))
+        throw new KeepAbort(`lookup into ${describe(m)} before its semantic finds ${describe(found)}`);
+    const f = recFrame();
+    if (f === null || m.semanticRun !== B!.PASS.initial)
+        return;
+    const c = unitContainer(f.u!);
+    if (c === null || c === m)
+        return;
+    let finders = peeks.get(m);
+    if (finders === undefined)
+        peeks.set(m, finders = new Set());
+    finders.add(c);
+}
+
+/** Whether `m` is a kept module whose semantic1 has not replayed in this compile, looked up by live code. */
+function pendingKept(m: Module): boolean {
+    if (!kept || mods.get(m) === undefined)
+        return false;
     const s1 = unitOf(m, KeepUnit.sem1);
-    if (s1 === undefined || stateOf(s1) !== 0 || mods.get(m) === undefined)
-        return;
     const top = stack[stack.length - 1];
-    if (top !== undefined && top.replay)
-        return;
-    throw new KeepAbort(`lookup into ${describe(m)} before its semantic`);
+    return s1 !== undefined && stateOf(s1) === 0 && (top === undefined || !top.replay);
+}
+
+/**
+ * Whether the `i`th imported scope of kept module `m` is not one its importAll left (`ModRec.imports`): its semantic1
+ * added it (a `static if` or mixin import) or raised its visibility (`static if (true) public import c;` over `import
+ * c;`, ScopeDsymbol.importScope: a fresh compile's search before that semantic1 skips `c` as a private import).
+ */
+function importMoved(m: Module, i: number): boolean {
+    const r = mods.get(m)!;
+    return i >= r.imports.length || m.visibilities![i] !== r.imports[i];
 }
 
 // ── the module tree ────────────────────────────────────────────────────────────────────────────────────────
@@ -2962,8 +3153,8 @@ export function keepParsed(m: Module, table: DsymbolTable): void {
     const overridden = b.Module.djsTextOf(path) !== null;
     const r: ModRec = {
         m, path, packages: pl?.packages ?? null, ident: pl?.ident ?? null, root: pl === null,
-        size: overridden ? -1 : st.size, mtime: st.mtimeMs, baseLen: m.members?.length ?? 0, scope: null,
-        regGen: compileNo, statics: new Map(), parseIds: [], parseAt: 0, parseGen: compileNo, parseLive: 0,
+        size: overridden ? -1 : st.size, mtime: st.mtimeMs, baseLen: m.members?.length ?? 0, imports: [], access: "",
+        scope: null, regGen: compileNo, statics: new Map(), parseIds: [], parseAt: 0, parseGen: compileNo, parseLive: 0,
         parseReported: false, clock: false, asPackage: null, asPackageGen: 0,
     };
     // a new module named as a kept one (another file) would meet the kept one's types, merged by their mangled
@@ -3038,7 +3229,7 @@ function observable(u: UnitRec, seen = new Set<UnitRec>()): string | null {
             }
         }
         // a request made inside a gag window of this unit replays gagged whatever this unit's entry
-        if ((op === OP_REQ || op === OP_REQI) && !(log[i + 4] as boolean)) {
+        if ((op === OP_REQ || op === OP_REQI) && (log[i + 4] as number) < 0) {
             const r = observable(log[i + 1] as UnitRec, seen);
             if (r !== null)
                 return r;
@@ -3074,7 +3265,7 @@ function inProgress(kind: KeepUnit): number {
  * of its entry and leaves those of its exit. Where they are others, it replays only when its work leaves them as they
  * are (not F_DEFOWN: every retry it ran did no work, so its log holds nothing of the symbols retried), and then only
  * when a retry of this compile's symbols does no work either (`probeRetry`): a fresh compile retries them inside the
- * unit, where the replay does not.
+ * unit, where the replay does not; or when they are a list such a retry proved in an earlier compile (`prove`).
  */
 function replayUnit(u: UnitRec, keepOpen = false): void {
     const b = B!;
@@ -3082,10 +3273,28 @@ function replayUnit(u: UnitRec, keepOpen = false): void {
     if ((u.flags & F_NOREPLAY) !== 0)
         throw new KeepAbort(`${KeepUnit[u.kind]} of ${describe(u.owner)} cannot replay`);
     const defers = (u.flags & F_DEFERS) !== 0;
-    const probe = defers && !sameDeferred(u.defIn);
+    // whether the unit runs inside a retry of the deferred symbols, where its own retries return at once, is a replay
+    // condition both ways: a unit whose work changes the deferred symbols (F_DEFOWN: it defers some, or a retry of its
+    // did work) replays only in the state it was recorded in
+    const nested = requestNested ?? nestedNow();
+    requestNested = null;
+    if ((u.flags & F_DEFOWN) !== 0 && u.nested !== nested)
+        throw new KeepAbort(`${KeepUnit[u.kind]} of ${describe(u.owner)} replayed ${nested ? "inside" : "outside"} a `
+            + `retry of the deferred symbols, recorded ${u.nested ? "inside" : "outside"} one`);
+    // recorded inside one, its own retries returned at once and left nothing in its log; outside one, with deferred
+    // symbols or symbols it defers, a fresh compile's retries inside the unit run: the probe tells whether they do work
+    const unnested = u.nested && !nested && (deferredNow() !== null || defers);
+    const other = (defers && !sameDeferred(u.defIn)) || unnested;
+    // other symbols than recorded, which a probe proved before (`prove`): the replay holds without the probe
+    const k = other && (u.flags & F_DEFOWN) === 0 && u.proved !== null && g.windowErrors === 0
+        ? u.proved.findIndex(sameDeferred) : -1;
+    const proved = k >= 0;
+    if (proved)
+        u.proved!.push(u.proved!.splice(k, 1)[0]!);     // the list used last is the last one dropped
+    const probe = other && !proved;
     if (probe && (u.flags & F_DEFOWN) !== 0)
         throw new KeepAbort(`other deferred symbols at the replay of ${describe(u.owner)}, which defers or retries`);
-    const defIn = probe ? deferredNow() : null;
+    const defIn = other ? deferredNow() : null;
     const E = g.gag;
     const spec = g.params.v.showGaggedErrors;
     const gagSame = spec ? E === u.e : (E === 0) === (u.e === 0);
@@ -3096,6 +3305,16 @@ function replayUnit(u: UnitRec, keepOpen = false): void {
     if (obs !== null)
         throw new KeepAbort(`${KeepUnit[u.kind]} of ${describe(u.owner)} replayed in another state (gag ${E}, `
             + `recorded ${u.e}; gagged ${owner.gagged ?? "-"}, recorded ${u.gagged}): ${obs}`);
+    // the tests of the error count (dmd/errors.ts `analysisSeesErrors`) read the gagged errors of the open windows,
+    // in the CLI and in editor mode alike: a unit that read one where only the windows open at its entry could make
+    // it true (`reads`) skipped analysis there, or ran it, by its entry's state (no copy constructor generated inside
+    // `__traits(compiles, { undefinedY(); Box!int b; })`, one generated outside it). A unit that read none replays
+    // under any state: the units it requested check their own entry at their replay. A replayed requester puts back,
+    // before each request inside its own windows, the gagged errors they held when recorded (`enterWindow`), so a
+    // request that did not move reads its recording's state.
+    if (u.reads && (g.windowErrors !== 0) !== u.ge)
+        throw new KeepAbort(`${KeepUnit[u.kind]} of ${describe(u.owner)} replayed ${u.ge ? "without" : "with"} gagged `
+            + "errors before it, recorded otherwise");
     // the generated names in its AST, and in what it prints, were numbered from `c0`
     if (u.ids.length !== 0 && b.suffixCounter() !== u.c0)
         shifted = true;
@@ -3122,16 +3341,20 @@ function replayUnit(u: UnitRec, keepOpen = false): void {
         (owner as unknown as Module)._scope = mods.get(owner as unknown as Module)!.scope as Module["_scope"];
     else
         owner.semanticRun = inProgress(u.kind);
-    stack.push(newFrame(u, true));
+    const frame = newFrame(u, true);
+    frame.nested = nested;
+    stack.push(frame);
     try {
         runLog(u, E);
         if (probe)
             probeRetry(u, defIn);
+        else if (proved)
+            recordLists(u, defIn);
     } finally {
         stack.pop();
     }
     setState(u, 2);
-    if (defers && !probe)
+    if (defers && !other)
         setDeferred(u.defOut);
     if (u.kind === KeepUnit.inst && (owner as unknown as TemplateInstance).inst === null)
         owner.semanticRun = b.PASS.initial;     // dmd/templatesem.d:1432, a creation that failed gagged
@@ -3150,12 +3373,16 @@ function replayUnit(u: UnitRec, keepOpen = false): void {
  * analysis of a deferred symbol only gets further as the work around it goes on, a retry at the unit's end that does
  * no work (`keepRetried`) proves those retries did none. The retry runs in a frame that records into a unit of its
  * own, not kept: where it does work (a symbol's analysis went further, a request, a report, a generated name), the
- * compile aborts. Where it does none, `u`'s record becomes the one a run here would make: the symbols at its entry,
- * `defIn`, and those at its exit, which a unit run for real inside the replay may have changed (then its work changes
- * them: F_DEFOWN). Under an outer retry (dmd/dsymbolsem.d:762 `nested`) the call returns at once, as a fresh compile's
- * do. Cost: one analysis of each deferred symbol up to where it stops.
+ * compile aborts. Where it does none, `u`'s record becomes the one a run here would make (`recordLists`), and the
+ * recorded entry list and `defIn`, where the replay left the list as it found it, are noted as proved (`prove`). Under
+ * an outer retry (dmd/dsymbolsem.d:762 `nested`), or in a replay of a log recorded inside one (`nestedNow`), a retry
+ * does nothing, a fresh compile's inside the unit there too: the replay holds there, and the retry, which did nothing,
+ * proves nothing for a replay outside one, so the list is neither noted nor recorded as the unit's. Cost: one analysis
+ * of each deferred symbol up to where it stops.
  */
 function probeRetry(u: UnitRec, defIn: Dsymbol[] | null): void {
+    if (nestedNow())
+        return;
     const p: UnitRec = { ...u, log: [], flags: 0, ids: [], deps: new Set(), files: null, misses: null, types: null,
         strings: null };
     const f = newFrame(p, false);
@@ -3168,10 +3395,77 @@ function probeRetry(u: UnitRec, defIn: Dsymbol[] | null): void {
     if ((p.flags & F_DEFOWN) !== 0 || p.log.length !== 0 || f.ids.length !== 0)
         throw new KeepAbort(`other deferred symbols at the replay of ${describe(u.owner)}, whose retry of them does `
             + "work");
+    if (sameDeferred(defIn) && B!.global.windowErrors === 0) {
+        if (sameList(u.defIn, u.defOut))
+            prove(u, u.defIn);
+        prove(u, defIn);
+    }
+    recordLists(u, defIn);
+}
+
+/**
+ * The record of a replay of `u` entered with other deferred symbols than recorded, `defIn`, that holds (`probeRetry`,
+ * or a list `prove` noted): the symbols at its entry and those at its exit, which a unit run for real inside the replay
+ * may have changed (then its work changes them: F_DEFOWN).
+ */
+function recordLists(u: UnitRec, defIn: Dsymbol[] | null): void {
     u.defIn = defIn;
     u.defOut = deferredNow();
     if (!sameDeferred(defIn))
         u.flags |= F_DEFOWN;
+}
+
+/**
+ * At the end of a compile that kept its state, the proved lists (`prove`) naming a symbol of a module or instance the
+ * compile dropped (an edited module is replaced when this compile loads it, after `keepPrepare`): such a list cannot
+ * come back, and it would keep the dropped module's AST alive into the next compile.
+ */
+function dropStaleProofs(): void {
+    const live = (l: Dsymbol[] | null): boolean => l === null || l.every((x) => {
+        const c = containerOf(x);
+        return c === null || isKept(c);
+    });
+    for (const list of unitsOf.values()) {
+        for (const u of list) {
+            if (u !== undefined && u.proved !== null)
+                u.proved = u.proved.filter(live);
+        }
+    }
+}
+
+/** How many entry lists a unit remembers as proved (`UnitRec.proved`). */
+const PROVED_LISTS = 4;
+
+/**
+ * Notes `list` among the entry lists `u`'s replay was proved to hold under, where it left the list as it found it
+ * (`probeRetry` outside an outer retry and with no gagged errors in open gag windows, or its recording): a later replay
+ * entered with one of them, with none either, replays without the probe (`replayUnit`, which moves the list it matched
+ * last: the oldest unused one goes first). A retry's work may depend on those gagged errors (the tests of the error
+ * count read them, `analysisSeesErrors`), which the list does not name.
+ * WHY: the probe of a list seen before can refuse what a fresh compile does: an import dropped and added again, whose
+ * kept analysis puts back among the deferred symbols one a kept replay analysed already (a struct inside a kept
+ * instance, `W!V`, at semantic3done, which no shadow state takes back), where a fresh compile's is still deferred; the
+ * probe's retry finds it done and drops it, which counts as work. The later replay does not repeat the proof: it takes
+ * the same symbols, at the same unit, whose log does not depend on the list (not F_DEFOWN), to be where they were when
+ * a retry of them did no work; a symbol a fresh compile would analyse further inside the unit there replays without
+ * that work (a risk the bound and `dropStaleProofs` keep small). Cost: up to PROVED_LISTS arrays of the deferred
+ * symbols per probed unit, which keep those symbols, and through them their modules' ASTs, alive until the list goes:
+ * at the end of the compile that drops one of their modules (`dropStaleProofs`), or past the bound (an `std.json`
+ * import toggled: about 20 units, lists of 3 at most).
+ */
+function prove(u: UnitRec, list: Dsymbol[] | null): void {
+    u.proved ??= [];
+    if (u.proved.some((l) => sameList(l, list)))
+        return;
+    u.proved.push(list);
+    if (u.proved.length > PROVED_LISTS)
+        u.proved.shift();
+}
+
+/** Whether two recorded lists of deferred symbols (null: empty) hold the same symbols in the same order. */
+function sameList(a: Dsymbol[] | null, b: Dsymbol[] | null): boolean {
+    const n = a === null ? 0 : a.length;
+    return n === (b === null ? 0 : b.length) && (n === 0 || a!.every((x, i) => x === b![i]));
 }
 
 function runLog(u: UnitRec, E: number): void {
@@ -3196,15 +3490,18 @@ function runLog(u: UnitRec, E: number): void {
                 if (st !== 0)
                     break;
                 const saved = g.gag;
-                const ge = g.gaggedErrors;
+                const win = enterWindow(log[i + 4] as number);
                 g.gag = mapGag(log[i + 2] as number, e, E);
+                const savedNested = requestNested;
+                requestNested = log[i + 5] as boolean;
                 try {
                     replayRequest(v);
                 } finally {
                     g.gag = saved;
+                    requestNested = savedNested;
                 }
-                if (log[i + 4] as boolean)
-                    endWindow(ge);
+                if (win !== null)
+                    endWindow(win);
                 break;
             }
             case OP_REQI: {
@@ -3230,8 +3527,10 @@ function runLog(u: UnitRec, E: number): void {
                 const minst = spec === null ? null : spec === MINST_TINST ? tinst!.minst
                     : spec === MINST_ROOT ? b.Module.rootModule : spec as Module;
                 const saved = g.gag;
-                const ge = g.gaggedErrors;
+                const win = enterWindow(log[i + 4] as number);
                 g.gag = mapGag(log[i + 2] as number, e, E);
+                const savedNested = requestNested;
+                requestNested = log[i + 9] as boolean;
                 try {
                     if (st === 0) {
                         if (!unitsOf.has(ti))
@@ -3241,15 +3540,15 @@ function runLog(u: UnitRec, E: number): void {
                         b.instanceMatch(ti, minst, tinst, g.gag > 0);
                 } finally {
                     g.gag = saved;
+                    requestNested = savedNested;
                 }
-                if (log[i + 4] as boolean)
-                    endWindow(ge);
+                if (win !== null)
+                    endWindow(win);
                 break;
             }
             case OP_REP: {
                 const saved = g.gag;
-                const inWin = log[i + 2] as boolean;
-                const ge = g.gaggedErrors;
+                const win = (log[i + 2] as boolean) ? enterWindow(0) : null;
                 g.gag = mapGag(log[i + 1] as number, e, E);
                 reportDepth++;
                 try {
@@ -3260,8 +3559,8 @@ function runLog(u: UnitRec, E: number): void {
                     reportDepth--;
                     g.gag = saved;
                 }
-                if (inWin)
-                    endWindow(ge);
+                if (win !== null)
+                    endWindow(win);
                 break;
             }
             case OP_TRACE: {
@@ -3405,14 +3704,38 @@ function runLog(u: UnitRec, E: number): void {
     }
 }
 
+/** The error counters at the start of a replayed event inside a gag window the replayed unit opened. */
+interface WindowMark {
+    ge: number;     // global.gaggedErrors
+    we: number;     // global.windowErrors
+}
+
+/**
+ * Before a replayed event inside a gag window the replayed unit opened (`w`: a request's logged window state, 0 for a
+ * report; -1, outside such a window, gives null): marks the counters for `endWindow`, then counts again the `w` gagged
+ * errors the window held at the event when recorded, which the previous event's `endWindow` took back, in the three
+ * counters a gagged report increments (dmd/errors.d:483-486, `Global.windowErrors`).
+ */
+function enterWindow(w: number): WindowMark | null {
+    if (w < 0)
+        return null;
+    const g = B!.global;
+    const m = { ge: g.gaggedErrors, we: g.windowErrors };
+    g.errors += w;
+    g.gaggedErrors += w;
+    g.windowErrors += w;
+    return m;
+}
+
 /**
  * The counters' part of `endGagging` (dmd/globals.d:481) for what an event made inside a gag window the replayed unit
- * opened: the window's end, which the replay does not run, takes back the gagged errors counted since `ge`.
+ * opened: the window's end, which the replay does not run, takes back the gagged errors counted since `m`.
  */
-function endWindow(ge: number): void {
+function endWindow(m: WindowMark): void {
     const g = B!.global;
-    g.errors -= g.gaggedErrors - ge;
-    g.gaggedErrors = ge;
+    g.errors -= g.gaggedErrors - m.ge;
+    g.gaggedErrors = m.ge;
+    g.windowErrors = m.we;
 }
 
 /** A replayed request of pending unit `v`: what its guard-passing entry would do. */

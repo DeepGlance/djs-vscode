@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { defaultLine, ldcRootArgs, planFlags, splitLine, targetArgs } from "./flags.js";
+import { defaultLine, deprecationsAreErrors, ldcRootArgs, planFlags, splitLine, targetArgs } from "./flags.js";
 
 const ROOT = "/work/app";
 const HOME = homedir();
@@ -84,5 +84,16 @@ describe("defaultLine — the setting djs.ldc2Line empty", () => {
         } finally {
             rmSync(root, { recursive: true });
         }
+    });
+});
+
+describe("deprecationsAreErrors — what the status bar counts", () => {
+    test("the last of -d, -de, -dw wins; kept by planFlags", () => {
+        expect(deprecationsAreErrors(planFlags(splitLine("ldc2 -i -de src/app.d"), ROOT).args)).toBe(true);
+        expect(deprecationsAreErrors(["-de", "-dw"])).toBe(false);
+        expect(deprecationsAreErrors(["-dw", "-d", "-de"])).toBe(true);
+        expect(deprecationsAreErrors(["-de", "-d"])).toBe(false);
+        expect(deprecationsAreErrors(["-debug", "-d-debug", "--d-version=de"])).toBe(false);
+        expect(deprecationsAreErrors(EDITOR)).toBe(false);
     });
 });

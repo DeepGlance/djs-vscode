@@ -36,6 +36,7 @@
 //   their place among those calls, so `messageText` and `lineOf` see what a fresh compile would hand them;
 // - output of child processes (the C preprocessor's `cc` diagnostics) goes to the inherited stderr, not `output`.
 
+import { flushCompileCache, getCompileCacheDir } from "node:module";
 import { isAbsolute } from "node:path";
 import { parentPort } from "node:worker_threads";
 import {
@@ -487,7 +488,12 @@ port.on("message", (req: Request) => {
         default: port.postMessage(query(req));
     }
 });
+// The compile cache (host/compiler.ts, `compileCache`), enabled by NODE_COMPILE_CACHE before this module loaded: V8
+// made the code cache when it compiled the modules, so it is complete here; written now, not at the worker's exit,
+// which a killed extension host never reaches. Both calls exist from Node 22.10; VS Code ^1.140 runs a later Node.
 const ready: ReadyMessage = {
     kind: "ready", legend: { types: [...SEMANTIC_TOKEN_TYPES], modifiers: [...SEMANTIC_TOKEN_MODIFIERS] },
+    compileCache: getCompileCacheDir() ?? null,
 };
+flushCompileCache();
 port.postMessage(ready);

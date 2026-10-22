@@ -45,8 +45,8 @@
 
 import { ScopeDsymbol, DSYM, DsymbolTable, Visibility, SearchOpt } from "./dsymbol.js";
 import {
-    K, keepLoad, keepMiss, keepModuleAsPackage, keepPackage, keepParse, keepParsed, keepPkgMod, keepTree,
-    keepWrappingPackage,
+    K, keepLoad, keepMiss, keepModuleAsPackage, keepPackage, keepPackageAccess, keepParse, keepParsed, keepPkgMod,
+    keepTree, keepWrappingPackage,
 } from "../keep.js";
 import type { Dsymbol, SearchOptFlags } from "./dsymbol.js";
 import type { AggregateDeclaration } from "./aggregate.js";
@@ -1220,6 +1220,7 @@ export class Module extends Package {
                                  flags: SearchOptFlags = SearchOpt.all): boolean {
         if (this.insearch) // don't follow import cycles
             return false;
+        if (K.on) keepPackageAccess(this);   // the kept-module engine: a kept module's package access
         this.insearch = true;
         try {
             // SearchOptFlags is a uint flag set (number domain) — bitmask test (09 §4.1).

@@ -50,16 +50,17 @@
 // THE FALLBACK. Where the analysis left no node, folded or rewritten away (an enum member or a manifest constant
 // replaced by its value, `S` in `S.staticMethod()`, a selective import's name), an identifier outside comments and
 // literals is looked up as written, read-only (`fallback`): after a `.`, in the scope of the symbol before it; else
-// from the innermost analysed function holding it, through the symbol tables (`lookupLexical`). It does not answer in
-// code the analysis skipped, where the tables around it hold other names: in the body of a function not analysed (a
-// template's own members, the branch a condition did not choose, semantic3 not run, a unittest's body without
-// `-unittest`, which the parser skips), and with a runtime variable or parameter, which no analysis folds away (the
-// branch a `static if` statement did not choose), except in the body of a function whose analysis reported errors
-// (`erroneousBody`): an expression with an error leaves an `ErrorExp`, a statement with one an `ErrorStatement` that
-// its block becomes, so the walk meets none of their names. There a name is looked up by position as completion finds a
-// first link (`brokenBodyLookup`: the function's locals declared before it, then the scopes outward), outside the
-// inactive branches; a name found outside the function's locals is refused when the body's text declares it, names it
-// as a lambda's untyped parameter, or holds a `with` statement, scopes the tables do not show.
+// from the innermost analysed function holding it, through the symbol tables (`lookupLexical`). The hover and the
+// definition refuse an inactive branch before any lookup (INACTIVE_REASON), as the tokens and the references skip it.
+// It does not answer in other code the analysis skipped, where the tables around it hold other names: in the body of a
+// function not analysed (a template's own members, semantic3 not run, a unittest's body without `-unittest`, which the
+// parser skips), and with a runtime variable or parameter, which no analysis folds away, except in the body of a
+// function whose analysis reported errors (`erroneousBody`): an expression with an error leaves an `ErrorExp`, a
+// statement with one an `ErrorStatement` that its block becomes, so the walk meets none of their names. There a name is
+// looked up by position as completion finds a first link (`brokenBodyLookup`: the function's locals declared before it,
+// then the scopes outward), outside the inactive branches; a name found outside the function's locals is refused when
+// the body's text declares it, names it as a lambda's untyped parameter, or holds a `with` statement, scopes the tables
+// do not show.
 // The lookup follows the imports declared in the function bodies holding the name, before it (`localImported`: a
 // renamed import's name, a selective import's, a plain import's module), then the tables outward, at the module what
 // its imports give as dmd's `search` finds it (`importedName`, `searchModule`: an imported module's own member, else
@@ -70,9 +71,8 @@
 // runtime variable answers where the analysis left a node of it under another name at the token or along the chain
 // before it (`resolvedNear`: `stdout` for its alias's target `__stdoutp`, a Tuple's `st.terminated`). It never answers
 // for the words that are no symbol (`fallbackAllowed`: `exit` in `scope(exit)` is not core.stdc.stdlib's `exit`). A
-// runtime variable before `.sizeof`, `.alignof`, `.mangleof` or `.stringof`, or inside `typeof(...)`, answers outside
-// the inactive branches: those keep no node of their operand (`foldedOperand`), and a member after it (through a
-// pointer) answers.
+// runtime variable before `.sizeof`, `.alignof`, `.mangleof` or `.stringof`, or inside `typeof(...)`, answers: those
+// keep no node of their operand (`foldedOperand`), and a member after it (through a pointer) answers.
 // A template's parameter with no node (in the parameter list, a constraint, a `static if` condition, a template's
 // argument) answers with the argument it stands for, as a use with a node does: of the instance whose analysed function
 // holds it, else the first, the hover counting them (`templateArgument`).
@@ -296,7 +296,8 @@
 //   2  built-in properties, the spec's fixed lists (`builtins`; an enum value's `min` and `max` are the enum's).
 // An item: kind (`completionKind`), detail (the hover's signature on one line, `(+N overloads)` after a member
 // function's), documentation (the doc comment's summary as `DocComment.parse` splits it, on one line: the overload
-// the item shows first, a UFCS candidate's receiving overload, then the name's). Sorted by group, then label.
+// the item shows first, a UFCS candidate's receiving overload, then the name's). Sorted by group, then label
+// (`completionOrder`: names starting with `_` last, case ignored first).
 // Without a `.` before the identifier being typed (or with nothing typed), the names visible there (`scopeCompletion`,
 // `scopeItems`), from the same compile and the same scope, found at the position moved as the dot is (of a template's
 // instances, the first copy), one item per name, the innermost declaration winning:
@@ -1965,9 +1966,17 @@ function miss(reason: string, stale = false): QueryMiss {
 export const STALE_REASON = "the file changed since the last compile";
 
 /**
+ * The reason of a hover, a definition, a signature help, a references or a rename query in a branch the compile did
+ * not choose (INACTIVE RANGES in the header).
+ */
+export const INACTIVE_REASON = "in a branch not compiled for this target and flags";
+
+/**
  * The hits at the identifier under (line, character) of `file`, whose editor text is `text`, and the chosen one:
  * the first hit whose symbol's name is the token, else the first whose name the compiler did not make; with how many
- * template instances hold a chosen hit.
+ * template instances hold a chosen hit. An identifier in an inactive branch misses (INACTIVE_REASON) as the semantic
+ * tokens, the hints and the references do: no analysis ran there, and the fallback's tables are the chosen branch's
+ * scope, not the one that branch would see.
  */
 function lookup(file: string, line: number, character: number, text: string):
     { hit: Hit; instances: number; bytes: Uint8Array; start: number } | QueryMiss {
@@ -1989,10 +1998,12 @@ function lookup(file: string, line: number, character: number, text: string):
         off--;
     if (!isIdentStart(bytes[off]))
         return miss("no identifier at the position");
+    if (rangeHolding(inactiveOf(m, ix), off) >= 0)
+        return miss(INACTIVE_REASON);
     const pool = choose(m, ix, off);
     if (pool.length === 0) {
         const allowed = inCode(ix, off) && fallbackAllowed(bytes, off);
-        const sym = allowed ? fallback(m, ix, off, 0, foldedOperand(m, ix, off)) : null;
+        const sym = allowed ? fallback(m, ix, off, 0, foldedOperand(ix, off)) : null;
         const args = sym === null && allowed ? templateArgument(m, ix, off) : [];
         if (sym === null && args.length === 0)
             return miss("no symbol at the position");
@@ -2548,15 +2559,14 @@ const FOLDING_PROPERTIES: ReadonlySet<string> = new Set(["sizeof", "alignof", "m
 
 /**
  * Whether the identifier at `start` is the operand of a property that folds it away (`addr.sizeof`), or inside the
- * parentheses of a `typeof` (`is(typeof(cl.flag) : bool)`: the analysis keeps only the type), outside the branches not
- * chosen: the fallback may then answer with a runtime variable, and a member after it.
+ * parentheses of a `typeof` (`is(typeof(cl.flag) : bool)`: the analysis keeps only the type): the fallback may then
+ * answer with a runtime variable, and a member after it.
  */
-function foldedOperand(m: Module, ix: FileIndex, start: number): boolean {
+function foldedOperand(ix: FileIndex, start: number): boolean {
     const t = ix.bytes;
     const dot = skipTrivia(t, identEnd(t, start));
     const p = t[dot] === 0x2e && t[dot + 1] !== 0x2e ? skipTrivia(t, dot + 1) : -1;
-    return (p >= 0 && FOLDING_PROPERTIES.has(utf8.decode(t.subarray(p, identEnd(t, p)))) || inTypeof(ix, start))
-        && !inactiveOf(m, ix).some(([a, b]) => a <= start && start < b);
+    return (p >= 0 && FOLDING_PROPERTIES.has(utf8.decode(t.subarray(p, identEnd(t, p))))) || inTypeof(ix, start);
 }
 
 /** How far back from a name its enclosing `typeof(` is searched. */
@@ -2601,7 +2611,7 @@ function identStartAt(t: Uint8Array, off: number): number {
  * last compile (THE CONTRACT in the header: read-only, between compiles). `file` is matched against the source files
  * of the last compile's modules, both resolved against the working directory. Misses: the file is not in the last
  * compile; `stale` (STALE_REASON) when `text` is not the text that compile read; no identifier, or no symbol, at the
- * position. Cost: see the header.
+ * position; the position in an inactive branch (INACTIVE_REASON). Cost: see the header.
  */
 export function queryHover(file: string, line: number, character: number, text: string): HoverAnswer {
     return printing(() => hover(file, line, character, text));
@@ -5035,7 +5045,7 @@ export interface CompletionItem {
 /** A completion item's group (`CompletionItem.group`). */
 export type CompletionGroup = 0 | 1 | 2 | 3;
 
-/** The names after a `.`, or in scope without one, sorted by group, then label. */
+/** The names after a `.`, or in scope without one, sorted by group, then label (`completionOrder`). */
 export interface CompletionResult {
     /**
      * The text the items replace, in the REQUEST's text: the identifier characters typed up to the position, after the
@@ -5111,9 +5121,9 @@ const RECEIVER_MODS = MODFlags.const_ | MODFlags.immutable_ | MODFlags.wild | MO
  * then true. `expr` is an identifier chain (`a.b.c`, across lines and comments; `this`
  * or `super` first; a leading `.` for the module scope; a link may end in `()`, a function's return type, or `[...]`,
  * an element's). The items: the members of what it names (group 0), the UFCS candidates the index knows (1), the
- * built-in properties (2), one per name, sorted by group then label. Without a dot: the locals and parameters declared
- * before the position (0), the enclosing aggregate's members (1), the module's names (2), the imported modules' public
- * names (3).
+ * built-in properties (2), one per name, sorted by group then label (`completionOrder`). Without a dot: the locals and
+ * parameters declared before the position (0), the enclosing aggregate's members (1), the module's names (2), the
+ * imported modules' public names (3).
  * Misses: the file is not in the last compile; the position is outside `text`; the dot, or without one the position,
  * in a comment or a literal; the dot after a number, the position in one; the function holding the moved position not
  * analysed; the expression not resolved (never a guess: the reason names the link), or a template's analysed
@@ -5191,8 +5201,18 @@ function completion(file: string, text: string, position: QueryPosition): Comple
         found ??= { place, target };
     }
     const items = completionItems(found!.place, found!.target);
-    items.sort((a, b) => a.group - b.group || compareText(a.label, b.label));
+    items.sort(completionOrder);
     return { result: { range: { start: positionOf(t, typed), end: position }, items, moved } };
+}
+
+/**
+ * The order of the completion items (COMPLETION in the header): by group; in a group the names that do not start with
+ * `_` first (a leading underscore marks an internal by D convention: dmd's `Expression._init()` came before every
+ * member of an `Expression`), then by label ignoring case, then by UTF-16 code unit (`Abc` before `abc`).
+ */
+function completionOrder(a: CompletionItem, b: CompletionItem): number {
+    return a.group - b.group || Number(a.label.startsWith("_")) - Number(b.label.startsWith("_"))
+        || compareText(a.label.toLowerCase(), b.label.toLowerCase()) || compareText(a.label, b.label);
 }
 
 /**
@@ -5216,7 +5236,7 @@ function scopeCompletion(m: Module, ix: FileIndex, t: Uint8Array, nc: [number, n
         return miss("the function at the position was not analysed");
     const place: Place = { m, ix, off: at, scope: scopes[0]!, edit, imports: localImports(ix, at), firstHits: null };
     const items = scopeItems(place);
-    items.sort((a, b) => a.group - b.group || compareText(a.label, b.label));
+    items.sort(completionOrder);
     return { result: { range: { start: positionOf(t, typed), end: position }, items, moved } };
 }
 
@@ -7567,8 +7587,8 @@ type ReferenceTarget =
  * The references of the symbol at (line, character) of `file`, whose editor text is `text` (REFERENCES in the
  * header), in every module the last compile analysed (its roots and the modules `-i` compiled); read-only, between
  * compiles (THE CONTRACT). Misses: those of `queryHover` (the file is not in the last compile; `stale`; no identifier
- * or no symbol at the position). Cost: the index of each analysed module whose text holds the name (its first query
- * after a compile builds it), then one lookup per occurrence of the name.
+ * or no symbol at the position; in an inactive branch, INACTIVE_REASON). Cost: the index of each analysed module whose
+ * text holds the name (its first query after a compile builds it), then one lookup per occurrence of the name.
  */
 export function queryReferences(file: string, line: number, character: number, text: string): ReferencesAnswer {
     return printing(() => {
@@ -7597,9 +7617,9 @@ function identifierStart(bytes: Uint8Array, line: number, character: number): nu
 }
 
 /**
- * What the identifier at a position names, for the references: a parameter of a template declared in the file whose
- * extent holds it (not after a `.`), else the token's symbol (`tokenSymbol`), a constructor named by its aggregate's
- * name (`S(1)`, `new S`) standing for the aggregate.
+ * What the identifier at a position names, for the references and the rename: a parameter of a template declared in
+ * the file whose extent holds it (not after a `.`), else the token's symbol (`tokenSymbol`), a constructor named by its
+ * aggregate's name (`S(1)`, `new S`) standing for the aggregate; nothing in an inactive branch (INACTIVE_REASON).
  */
 function referenceTarget(file: string, line: number, character: number, text: string)
     : { target: ReferenceTarget; m: Module; ix: FileIndex; start: number } | QueryMiss {
@@ -7613,11 +7633,13 @@ function referenceTarget(file: string, line: number, character: number, text: st
     const start = identifierStart(ix.bytes, line, character);
     if (typeof start !== "number")
         return start;
+    if (rangeHolding(inactiveOf(m, ix), start) >= 0)
+        return miss(INACTIVE_REASON);
     const word = utf8.decode(ix.bytes.subarray(start, identEnd(ix.bytes, start)));
     const param = parameterAt(m, ix, start, word);
     if (param !== null)
         return { target: param, m, ix, start };
-    let sym = tokenSymbol(m, ix, start, inactiveFrom(m, ix, start));
+    let sym = tokenSymbol(m, ix, start, null);
     if (sym === null || (isCompilerName(sym) && sym.isCtorDeclaration() === null))
         return miss("no symbol at the position");
     if (sym.isCtorDeclaration() !== null && word !== "this")
@@ -7862,7 +7884,10 @@ export function queryRename(file: string, line: number, character: number, text:
  * file), a constructor or another special function (`this`), a name D calls implicitly (`IMPLICIT_NAMES`, an
  * operator's `opBinary`), a symbol declared in a string mixin or without a declaration, one declared in a module the
  * last compile only imports (the bundled import tree's included: its other uses are not analysed), one whose name a
- * string mixin's text spells in an analysed module (a token string, or a literal in a `mixin(...)`'s arguments).
+ * string mixin's text spells in an analysed module (a token string, or a literal in a `mixin(...)`'s arguments), a
+ * symbol whose name is spelled in an inactive branch of an analysed module (`inactiveSpelling`: the references do not
+ * look there, and a build for a target that compiles the branch would break); and nothing in an inactive branch
+ * (`referenceTarget`). A template parameter's references are textual, inactive branches included.
  */
 function renameTarget(file: string, line: number, character: number, text: string)
     : { target: ReferenceTarget; ix: FileIndex; start: number; references: ReferenceSite[] } | QueryMiss {
@@ -7892,6 +7917,10 @@ function renameTarget(file: string, line: number, character: number, text: strin
     const spelled = mixinSpelling(t);
     if (spelled !== null)
         return miss(`\`${t.name}\` is spelled in the text of a string mixin at ${spelled}`);
+    const inactive = t.kind === "symbol" ? inactiveSpelling(t.name) : null;
+    if (inactive !== null)
+        return miss(`\`${t.name}\` is spelled in a branch not compiled for this target and flags at ${inactive}: its `
+            + "uses there are not analysed");
     return { target: t, ix: r.ix, start: r.start, references: referencesOf(t) };
 }
 
@@ -7919,6 +7948,25 @@ function mixinSpelling(t: ReferenceTarget): string | null {
             if (word.test(utf8.decode(b.subarray(s, e))))
                 return `${str(m.srcfile.toChars())}:${positionOf(b, s).line + 1}`;
         }
+    }
+    return null;
+}
+
+/**
+ * Where the identifier `name` is spelled in code in an inactive branch of a module the references search (`file:line`,
+ * line from 1), or null: the uses there have no analysis, so the references miss them and a rename would leave them.
+ * Cost: one scan of each analysed module whose text holds the name, and its inactive ranges.
+ */
+function inactiveSpelling(name: string): string | null {
+    for (const m of analysedModules()) {
+        const ix = indexOf(m);
+        if (!ix.text.includes(name))
+            continue;
+        hitsOf(m, ix);
+        const ranges = inactiveOf(m, ix);
+        const p = ranges.length === 0 ? undefined : occurrences(ix, name).find((q) => rangeHolding(ranges, q) >= 0);
+        if (p !== undefined)
+            return `${str(m.srcfile.toChars())}:${positionOf(ix.bytes, p).line + 1}`;
     }
     return null;
 }
@@ -7953,8 +8001,9 @@ const CALL_WINDOW = 4096;
  * The candidates of the call whose parentheses hold (line, character) of `file`, whose editor text is `text` (SIGNATURE
  * HELP in the header): the function the compile resolved the call to first, then the rest of its overload set; the
  * argument the position is in. Read-only, between compiles (THE CONTRACT). Misses: those of `queryHover` (not in the
- * last compile; `stale`); not inside a call's parentheses; no function named before them. Cost: a backward scan of the
- * statement, the file's index when no query built it since the compile, one print per candidate.
+ * last compile; `stale`; in an inactive branch, INACTIVE_REASON); not inside a call's parentheses; no function named
+ * before them. Cost: a backward scan of the statement, the file's index when no query built it since the compile, one
+ * print per candidate.
  */
 export function querySignatureHelp(file: string, line: number, character: number, text: string): SignatureHelpAnswer {
     return printing(() => {
@@ -7969,6 +8018,8 @@ export function querySignatureHelp(file: string, line: number, character: number
         const off = byteOffset(t, line, character);
         if (off === null)
             return miss("the position is outside the text");
+        if (rangeHolding(inactiveOf(m, ix), off) >= 0)
+            return miss(INACTIVE_REASON);
         const paren = openParen(ix, off);
         if (paren < 0)
             return miss("not inside a call's parentheses");

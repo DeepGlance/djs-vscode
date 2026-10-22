@@ -2,18 +2,82 @@
 //
 // Used by the extension (extension/extension.cts) and by the host tests; it has no VS Code dependency.
 
+import { readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import type {
-    AstReply, CompileReply, CompletionReply, DefinitionReply, DocumentSymbolsReply, ExpansionReply, ExpansionSitesReply,
+    AstReply, CompileReply, CompletionReply, DefinitionReply, Diagnostic, DocumentSymbolsReply, ExpansionReply,
+    ExpansionSitesReply,
     HoverReply, ImportsReply, InactiveRangesReply, InlayHintsReply, InstancesReply, Position, Range, ReferencesReply,
     RenameReply, Reply, Request, SignatureHelpReply, SemanticTokensReply, TokenLegend, UnusedReply, WorkerMessage,
 } from "./protocol.js";
+
+/**
+ * The compile-cache directory for a DjsCompiler of `version` (the extension's):
+ * `<storage>/compile-cache/<version>-node<Node version>`, so that an update of the extension or of the Node running it
+ * starts a new one. Starts the removal of the other directories of `<storage>/compile-cache` named so (other versions'
+ * caches; nothing else there or in `storage` is touched); `removed` settles when it is done, rejecting with the first
+ * failure (none when `compile-cache` does not exist yet). Nothing is created: Node creates the directory at the
+ * worker's start.
+ */
+export function prepareCompileCache(storage: string, version: string): { dir: string; removed: Promise<void> } {
+    const root = join(storage, "compile-cache");
+    const name = `${version}-node${process.versions.node}`;
+    const removed = readdir(root).then(
+        async (names) => {
+            await Promise.all(names.filter((n) => n !== name && /-node\d+\.\d+\.\d+$/.test(n))
+                .map((n) => rm(join(root, n), { recursive: true, force: true })));
+        },
+        (e: NodeJS.ErrnoException) => {
+            if (e.code !== "ENOENT")
+                throw e;
+        });
+    return { dir: join(root, name), removed };
+}
 
 /** Where `DjsCompiler.send` puts a call: after every queued one, or ahead of those queued `last`. */
 type QueuePosition = "last" | "next";
 
 /** The worker's stack: the CLI runs `node --stack-size=7600` (KiB) on the main thread's 8 MiB (ruling 3). */
 export const STACK_SIZE_MB = 8;
+
+/**
+ * A reply's diagnostics as an editor shows them, in order: one identical to an earlier one (same file, dmd position,
+ * severity and text; its supplemental lines not compared) is dropped, since dmd reports a deprecation inside a template
+ * once per instance, and an error in a template's code not depending on its arguments once per instantiation.
+ */
+export function distinctDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
+    const seen = new Set<string>();
+    return diagnostics.filter((d) => {
+        const identity = JSON.stringify([d.file, d.dmdLine, d.dmdColumn, d.severity, d.message]);
+        const first = !seen.has(identity);
+        seen.add(identity);
+        return first;
+    });
+}
+
+/**
+ * The errors among `shown` (`distinctDiagnostics`), the count an editor reports: the diagnostics of severity `error`,
+ * and those of severity `deprecation` too when `deprecationsAreErrors` (`-de`, host/flags.ts: dmd counts a deprecation
+ * as an error and prints it with its `Deprecation:` header; the editor then lists it as an error too). It may be less
+ * than the reply's `errors` (global.errors), which stays the outcome's test (10 §4.7): dmd counts again, with no
+ * message, each use of a template instance whose analysis had errors (dmd/templatesem.d:1021), and a repeated
+ * diagnostic counts once per report. It may be more under `-verrors=spec`, which shows gagged errors without counting
+ * them.
+ */
+export function shownErrors(shown: readonly Diagnostic[], deprecationsAreErrors: boolean): number {
+    return shown.filter((d) => d.severity === "error" || (deprecationsAreErrors && d.severity === "deprecation"))
+        .length;
+}
+
+/**
+ * The status bar tooltip's line on the error count: when the editor shows fewer errors (`shown`, `shownErrors`) than
+ * the compiler counted (`counted`, the reply's `errors`), why; else empty (more shown is `-verrors=spec`, asked for).
+ */
+export function errorCountNote(shown: number, counted: number): string {
+    return shown < counted ? `The compiler counted ${counted} error${counted === 1 ? "" : "s"}: a template instance `
+        + "with errors counts again at each use, a repeated message at each report." : "";
+}
 
 /**
  * A djs compiler in a worker thread.
@@ -63,17 +127,39 @@ export class DjsCompiler {
     private running = false;
     private pending: { id: number; resolve: (r: Reply) => void; reject: (e: Error) => void } | null = null;
     private tokenLegend: TokenLegend | null = null;
+    private activeCache: string | null = null;
 
-    /** `workerFile`: the emitted host/worker.js (the default is the one next to this file). */
-    constructor(private readonly workerFile: URL = new URL("./worker.js", import.meta.url)) {}
+    /**
+     * `workerFile`: the emitted host/worker.js (the default is the one next to this file). `compileCache`: a directory
+     * for Node's compile cache in the worker (`NODE_COMPILE_CACHE` in the worker's environment, so the worker's entry
+     * module itself is cached: the bundle is that one module); Node creates it, and keeps there a subdirectory per Node
+     * version holding V8's code cache of the modules the worker loads (the bundle: ~1.3-1.5 MB depending on Node),
+     * checked against each module's content. Absent: no cache (the host tests). A Node that cannot enable it there
+     * (permissions, a file in the way, a full disk) starts the worker without it; `compileCacheDir` says which.
+     * Cost, the minified bundle in VS Code 1.142's Node (24.21): the worker's start to ready -25 % of its instructions
+     * (65 -> 30 ms), the first start, which writes the cache, +8 %; a compile unchanged.
+     */
+    constructor(private readonly workerFile: URL = new URL("./worker.js", import.meta.url),
+        private readonly compileCache?: string) {}
+
+    /**
+     * The compile-cache directory active in the last worker that started (Node's subdirectory of `compileCache`), null
+     * when none is (no `compileCache`, or Node did not enable it); null before a worker started.
+     */
+    compileCacheDir(): string | null {
+        return this.activeCache;
+    }
 
     private start(): Promise<void> {
-        const w = new Worker(this.workerFile, { resourceLimits: { stackSizeMb: STACK_SIZE_MB } });
+        const env = this.compileCache === undefined ? process.env
+            : { ...process.env, NODE_COMPILE_CACHE: this.compileCache };
+        const w = new Worker(this.workerFile, { resourceLimits: { stackSizeMb: STACK_SIZE_MB }, env });
         this.worker = w;
         return new Promise<void>((resolve, reject) => {
             w.on("message", (m: WorkerMessage) => {
                 if (m.kind === "ready") {
                     this.tokenLegend = m.legend;
+                    this.activeCache = m.compileCache;
                     resolve();
                 } else if (this.pending !== null && m.id === this.pending.id) {
                     const p = this.pending;

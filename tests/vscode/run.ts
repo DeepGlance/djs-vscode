@@ -40,7 +40,8 @@ async function runSuite(suite: string, trusted: boolean): Promise<void> {
     }, null, 4));
     writeFileSync(join(ws, "src", "lib.d"), "module lib;\n/// The library's value.\nint libValue() { return 1; }\n"
         + "auto twice(int n) { return n * 2; }\nT same(T)(T v) { return v; }\n"
-        + "int four() { auto r = twice(same(2)); return r; }\nalias SameInt = same!int;\n");
+        + "int four() { auto r = twice(same(2)); return r; }\nalias SameInt = same!int;\n"
+        + "int _hidden() { return 0; }\n");
     writeFileSync(join(ws, "src", "app.d"), "module app;\nimport lib;\n// perché è così: a non-ASCII comment\n"
         + "void main() { string s = \"è\"; int x = \"a\"; }\nversion (Foo) {} else static assert(0, \"no Foo\");\n");
     writeFileSync(join(work, "outside.d"), "module outside;\nvoid f() {}\n");   // in no workspace folder

@@ -111,9 +111,9 @@
 // an unchanged file does: the engine replays the first compile, and the second compile's exit status and text must be
 // the first's, byte for byte (the record's `recompile`; the summary lists every test where they differ).
 // `--editor` makes the child call as djs-vscode's worker does: a fatal handler answering true (editor mode, 10 §4.7)
-// and the doc-comment knob on. Past a test's first fatal point the output has no oracle (the CLI's is a prefix of
-// it), so such a test is a MISMATCH by construction there; the switch is for `--recompile`, whose comparison is
-// between the child's own two compiles.
+// and the doc-comment knob on. Past a test's first error the output has no oracle (the editor analyses on where the
+// CLI skips, and runs past the fatal points), so such a test is a MISMATCH by construction there; the switch is for
+// `--recompile`, whose comparison is between the child's own two compiles.
 //
 // TARGET MODE. `--mtriple <t>` measures a cross target (10 §4.8): both compilers get `-mtriple=<t>` where d_do_test
 // puts `-m64` (ldc2 refuses the two together), and the headers are read as d_do_test reads them natively on that
@@ -1089,7 +1089,7 @@ async function main(): Promise<void> {
 
         const summary = (o.mtriple !== null ? `target: -mtriple=${o.mtriple} (d_do_test OS=${env.os})\n\n` : "")
             + (o.inProcess ? `in-process: one shim process per lane, ${shims.length} lanes`
-                + `${o.editor ? ", editor mode (past a fatal point no oracle)" : ""}\n\n` : "")
+                + `${o.editor ? ", editor mode (past the first error no oracle)" : ""}\n\n` : "")
             + (o.keep ? keepSummary(results) + "\n" : "")
             + (o.recompile ? recompileSummary(results) + "\n" : "")
             + summarize(results);

@@ -63,8 +63,10 @@
 // one compile by design: djs reads the expression from the document's current text and finds its scope through the
 // same text move the hints use, so a half-typed line needs no compile of its own. After a dot, members of the type
 // come first, then UFCS candidates, then built-in properties; without one, locals and parameters, the enclosing
-// aggregate's members, the module's names, the imported modules'. A miss gives no items. VS Code asks at the start of
-// every word typed and filters that answer as the word grows; a request made during a compile waits for it.
+// aggregate's members, the module's names, the imported modules'; in a group, djs's order (case ignored, a leading `_`
+// last), kept by each item's `sortText`, its index (VS Code sorts by the lowercased `sortText`, where `_` comes before
+// every letter). A miss gives no items. VS Code asks at the start of every word typed and filters that answer as the
+// word grows; a request made during a compile waits for it.
 // Semantic tokens (djs 10 §4.7, "Queries"; setting `djs.semanticTokens`, default on) colour a D file of the workspace
 // by what each identifier names, over the grammar's colours. The legend is djs's, which the worker sends when it
 // starts (the worker starts at activation, so that the provider can be registered with it; a worker that cannot start
@@ -165,6 +167,10 @@ let status: vscode.StatusBarItem;
 let subscriptions: vscode.Disposable[];
 /** Whether the semantic-tokens provider is registered (it needs the legend of a worker that started). */
 let tokensRegistered = false;
+/** The compile-cache directory asked of the worker (host/compiler.ts `prepareCompileCache`). */
+let cacheDir: string;
+/** Whether the output channel has said if the first worker's compile cache is active (said once a session). */
+let cacheReported = false;
 /** The files each root's last compile put diagnostics on, cleared when that root compiles again. */
 const reported = new Map<string, vscode.Uri[]>();
 /**
@@ -281,18 +287,14 @@ function range(l: Range): vscode.Range {
 }
 
 /**
- * djs diagnostics to VS Code's, grouped by file; a diagnostic without a file goes on the root's first line. A
- * diagnostic identical to an earlier one (same file, position, severity and text) is dropped: dmd reports a
- * deprecation inside a template once per instance, and the Problems panel would list each copy.
+ * djs diagnostics, without repeats (`distinctDiagnostics`: the Problems panel would list each copy), to VS Code's,
+ * grouped by file; a diagnostic without a file goes on the root's first line. A deprecation is an error under `-de`
+ * (`deprecationsAreErrors`), as the compiler and the status bar count it.
  */
-function convert(reply: CompileReply, root: vscode.Uri): Map<string, vscode.Diagnostic[]> {
+function convert(shown: readonly DjsDiagnostic[], root: vscode.Uri, deprecationsAreErrors: boolean)
+    : Map<string, vscode.Diagnostic[]> {
     const byFile = new Map<string, vscode.Diagnostic[]>();
-    const seen = new Set<string>();
-    for (const d of reply.diagnostics as DjsDiagnostic[]) {
-        const identity = JSON.stringify([d.file, d.dmdLine, d.dmdColumn, d.severity, d.message]);
-        if (seen.has(identity))
-            continue;
-        seen.add(identity);
+    for (const d of shown) {
         const uri = d.file === null ? root : vscode.Uri.file(d.file);
         let message = d.message;
         const related: vscode.DiagnosticRelatedInformation[] = [];
@@ -303,7 +305,8 @@ function convert(reply: CompileReply, root: vscode.Uri): Map<string, vscode.Diag
                 related.push(new vscode.DiagnosticRelatedInformation(
                     new vscode.Location(vscode.Uri.file(s.file), range(s)), s.message));
         }
-        const v = new vscode.Diagnostic(range(d), message, SEVERITY[d.severity]);
+        const v = new vscode.Diagnostic(range(d), message, deprecationsAreErrors && d.severity === "deprecation"
+            ? vscode.DiagnosticSeverity.Error : SEVERITY[d.severity]);
         v.source = "djs";
         if (d.severity === "deprecation")
             v.tags = [vscode.DiagnosticTag.Deprecated];
@@ -367,7 +370,9 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     const rootKey = file.toString();
     for (const uri of reported.get(rootKey) ?? [])
         collection.delete(uri);
-    const byFile = convert(reply, file);
+    const shown = host.compiler.distinctDiagnostics(reply.diagnostics);
+    const de = host.flags.deprecationsAreErrors(plan.args);
+    const byFile = convert(shown, file, de);
     const uris: vscode.Uri[] = [];
     for (const [key, list] of byFile) {
         const uri = vscode.Uri.parse(key);
@@ -381,8 +386,11 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
     const fresh = reply.mode === "fresh" ? ", fresh" : "";
     const defaulted = line === "" ? ", default line" : "";
     const restricted = vscode.workspace.isTrusted ? "" : ", restricted";
+    // the errors the Problems panel lists; the icon is the compile's outcome, global.errors (10 §4.7), which may count
+    // more (`shownErrors`)
+    const count = host.compiler.shownErrors(shown, de);
     if (reply.status === 0) {
-        const errors = `${reply.errors} error${reply.errors === 1 ? "" : "s"} `;
+        const errors = `${count} error${count === 1 ? "" : "s"} `;
         status.text = `${reply.errors === 0 ? "$(check)" : "$(error)"} djs: ${name} ${reply.errors === 0 ? "" : errors}`
             + `${secs} s, ${source}${fresh}${defaulted}${restricted}`;
     } else {
@@ -396,8 +404,9 @@ async function compileOne(folder: vscode.WorkspaceFolder, file: vscode.Uri, caus
         + "command line your build uses for this repository." : "";
     const untrusted = restricted ? "Restricted Mode: the folder's djs.ldc2Line and djs.ldcRoot are ignored until you "
         + "trust it." : "";
-    status.tooltip = [why, from, how, untrusted, reply.output.slice(0, 2000)].filter((t) => t !== "").join("\n\n")
-        || undefined;
+    const counted = reply.status === 0 ? host.compiler.errorCountNote(count, reply.errors) : "";
+    status.tooltip = [why, counted, from, how, untrusted, reply.output.slice(0, 2000)].filter((t) => t !== "")
+        .join("\n\n") || undefined;
     // the AST views and the instances explorer show WORKER_DIED since a death: the first compile after it, a pause's
     // too, refreshes them as a save's does
     const afterDeath = deadAt === generation;
@@ -654,9 +663,9 @@ const COMPLETION_KINDS: Record<CompletionKind, vscode.CompletionItemKind> = {
 
 /**
  * The completion of a D file of the workspace, after `expr.` or of the names in scope (see the header): djs's items
- * from the last compile, kind, signature and the doc comment's summary, ordered by djs's group then name, each
- * replacing the identifier typed up to the position. A miss of djs, a request VS Code cancelled before its turn and a
- * worker that died give nothing (undefined).
+ * from the last compile, kind, signature and the doc comment's summary, in djs's order (`sortText` the item's index,
+ * zero-padded), each replacing the identifier typed up to the position. A miss of djs, a request VS Code cancelled
+ * before its turn and a worker that died give nothing (undefined).
  */
 async function provideCompletion(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken)
     : Promise<vscode.CompletionItem[] | undefined> {
@@ -671,11 +680,12 @@ async function provideCompletion(doc: vscode.TextDocument, pos: vscode.Position,
         return undefined;
     }
     const replaced = range(r.result.range);
-    return r.result.items.map((d) => {
+    const width = String(r.result.items.length).length;
+    return r.result.items.map((d, i) => {
         const item = new vscode.CompletionItem(d.label, COMPLETION_KINDS[d.kind]);
         item.detail = d.detail || undefined;
         item.documentation = d.documentation || undefined;
-        item.sortText = `${d.group}${d.label}`;
+        item.sortText = String(i).padStart(width, "0");
         item.range = replaced;
         return item;
     });
@@ -1720,6 +1730,8 @@ interface DjsApi {
     dimmedRanges(uri: string): vscode.Range[];
     /** The labels of the top-level items the explorer `view` shows now, asked of its provider. */
     explorerItems(view: "instances" | "imports"): Promise<string[]>;
+    /** The compile-cache directory active in the worker (host/compiler.ts `compileCacheDir`), null when none is. */
+    compileCacheDir(): string | null;
 }
 
 /**
@@ -1820,6 +1832,12 @@ async function registerTokens(): Promise<void> {
         reportDeath(e);
         return;
     }
+    if (!cacheReported) {
+        cacheReported = true;
+        const dir = compiler.compileCacheDir();
+        channel.appendLine(dir === null ? `compile cache: not active, Node could not enable it in ${cacheDir}`
+            : `compile cache: ${dir}`);
+    }
     if (tokensRegistered)
         return;
     tokensRegistered = true;
@@ -1836,10 +1854,15 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         flags: await import(url.pathToFileURL(path.join(dir, "flags.js")).href),
         ast: await import(url.pathToFileURL(path.join(dir, "ast.js")).href),
     };
-    compiler = new host.compiler.DjsCompiler();
+    channel = vscode.window.createOutputChannel("djs");
+    // the cache in the extension's global storage, the other versions' caches removed (host/compiler.ts)
+    const cache = host.compiler.prepareCompileCache(context.globalStorageUri.fsPath,
+        context.extension.packageJSON.version);
+    cacheDir = cache.dir;
+    cache.removed.catch((e: Error) => channel.appendLine(`compile cache: old caches not removed: ${e.message}`));
+    compiler = new host.compiler.DjsCompiler(undefined, cacheDir);
     collection = vscode.languages.createDiagnosticCollection("djs");
     unusedCollection = vscode.languages.createDiagnosticCollection("djs-unused");
-    channel = vscode.window.createOutputChannel("djs");
     status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
     status.text = "djs";
     status.show();
@@ -1927,6 +1950,7 @@ async function activate(context: vscode.ExtensionContext): Promise<DjsApi> {
         statusText: () => status.text,
         dimmedRanges: (uri) => dimmed.get(uri) ?? [],
         explorerItems,
+        compileCacheDir: () => compiler.compileCacheDir(),
     };
 }
 

@@ -384,6 +384,7 @@ function vreportDiagnosticSourceLoc(
                 printDiagnostic(format, ap, info);
             }
             global.gaggedErrors++;
+            global.windowErrors++;  // no D counterpart: see `Global.windowErrors`
         }
     };
 
@@ -756,6 +757,45 @@ export class FatalError extends Error {
  */
 export function throwFatalError(): never {
     throw new FatalError();
+}
+
+/**
+ * Whether the compile runs in editor mode: a fatal handler other than the CLI's `throwFatalError` (or none, the tests'
+ * harness) is installed, the host's, which answers true (10 §4.7, "Editor mode"). `djsMain` installs it before the
+ * compile starts, so the mode is known before any `fatal()` is called. No D counterpart.
+ */
+export function editorMode(): boolean {
+    return fatalErrorHandler !== null && fatalErrorHandler !== throwFatalError;
+}
+
+/**
+ * The reading of the dmd tests that skip analysis, or a report, when ANY error was reported (`if (global.errors)`):
+ * dmd/clone.d:1688 (`needCopyOrMoveCtor`), dmd/dsymbolsem.d:819 and :837 (the deferred semantic2/semantic3 loops),
+ * dmd/templatesem.d:3001 under gag (at gag level 0 it keeps D's reading, templatesem.ts) and dmd/typesem.d:4405. No D
+ * counterpart. The kept-module engine records, at each site, whether a unit's answer depended on the windows open at
+ * its entry (keep.ts `keepReadErrors`).
+ *
+ * In the CLI it is D's test, `global.errors !== 0`, as ldc2. In editor mode (`editorMode`) it is
+ * `global.windowErrors !== 0`: an error reported to the editor does not switch analysis off elsewhere; only the gagged
+ * errors of the gag windows open now do, exactly as in a compile without the reported errors. `windowErrors` (djs's,
+ * globals.ts) counts the gagged reports and is restored at each window's end, so at gag level 0 it is 0; inside windows
+ * it counts the windows' own gagged errors, which dmd also adds to `global.errors`: in a compile without ungagged
+ * errors the two readings are equal at every point, so the editor's output up to its first error is ldc2's. D's
+ * `gaggedErrors` would not do: an instance with errors matched ungagged adds to it and it stays counted past every
+ * window (dmd/templatesem.d:1021-1022).
+ *
+ * Why: the kept-module engine (src/keep.ts) replays a unit recorded in a compile without errors into one that has
+ * reported some, where under D's reading a fresh compile skips that analysis. Under this reading a fresh compile reads
+ * at the unit's tests what the recording read, so kept equals fresh without dropping the units that cross them: the
+ * engine records the window state of each request and whether a unit read these tests (`keepReadErrors`), and refuses
+ * only the replay of a reading unit entered with other gagged errors than recorded (keep.ts `replayUnit`, at
+ * templatesem.d:3001 at gag level 0 `keepErrorState`, as in the CLI). Rejected: dropping or aborting the units that
+ * cross these tests in another error state (exact, but `std.typecons` and `std.traits` instances cross them, and a kept
+ * compile of a 170-module application after a semantic error cost a fresh one's 48-53 s); reading no error past a
+ * returned `fatal()` (it hid the gagged errors: `__traits(compiles, ...)` answered true).
+ */
+export function analysisSeesErrors(): boolean {
+    return editorMode() ? global.windowErrors !== 0 : global.errors !== 0;
 }
 
 /**

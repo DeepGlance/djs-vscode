@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 (preview)
+
+On djs 0.3.0.
+
+- A half-typed line or a type error no longer makes a compile differ from one from scratch: an error does not switch
+  analysis off elsewhere, so the other diagnostics stay (a deprecation, a second independent error), and the compile
+  after it reanalyses only the change.
+- Hover, go to definition, signature help, references and rename answer nothing in a branch not compiled for the
+  target and flags (the dimmed code), as semantic highlighting and inlay hints already did: some showed a type or a
+  function found from the compiled branch's scope. Completion still offers the compiled scope's names there. Rename
+  refuses a name a branch not compiled uses, whose uses there the references miss.
+- Completion keeps djs's order, case ignored and a name with a leading `_` last: dmd's `_init` no longer comes first.
+- The status bar counts the errors the Problems panel lists; under `-de` a deprecation is an error in both, as the
+  compiler counts it. Its tooltip names the compiler's own count when that is higher (a template instance with errors
+  counts again at each use).
+- Large programs keep: the DMD frontend's own sources, which compiled from scratch at every save, now keep (an
+  unchanged save in tens of milliseconds, an edit about two thirds of a fresh compile, its import cycle reanalysed);
+  re-adding an import keeps; some compiles that differed from a fresh one in the order of their messages no longer do.
+- A faster start: the compiler's worker caches its compiled code (Node's compile cache, in the extension's storage,
+  per version) and the bundle is minified (names kept for readable errors): from its start to ready it takes about
+  30 % fewer instructions and half the time (about 65 to 30 ms), and the package is 0.4 MB smaller.
+
 ## 0.2.0 (preview)
 
 On djs 0.2.0.

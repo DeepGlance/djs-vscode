@@ -1182,11 +1182,11 @@ from the same directory and on unchanged files, as an editor's re-save of an unc
 compile's exit status and text must be the first's, byte for byte; the record carries the comparison and the
 second compile's mode, and the summary counts the second compiles, the kept ones, and lists every test where the two
 differ, kept or fresh. `--editor` (with `--in-process`) makes the child call as djs-vscode's worker does: a fatal
-handler answering true (editor mode, §4.7) and the doc-comment knob on; past a test's first fatal point the output has
-no oracle (the CLI's is a prefix of it), so such a test is a MISMATCH by construction, and the switch serves
-`--recompile`, whose comparison is between the child's own two compiles. `--mtriple <t>` measures a target of §4.8:
-both compilers get `-mtriple=<t>` where d_do_test puts `-m64`, and the headers are read as a native run on
-that target.
+handler answering true (editor mode, §4.7) and the doc-comment knob on; past a test's first error the output has no
+oracle (the editor analyses on where the CLI skips, and runs past the fatal points), so such a test is a MISMATCH by
+construction, and the switch serves `--recompile`, whose comparison is between the child's own two compiles.
+`--mtriple <t>` measures a target of §4.8: both compilers get `-mtriple=<t>` where d_do_test puts `-m64`, and the
+headers are read as a native run on that target.
 
 ### 4.6 The Phobos runner
 
@@ -1241,12 +1241,29 @@ defect analysed). The host's contract:
   (`main.d:930`, after the `fatal()` on `global.errors` returns). The host reads `global.errors` and
   `global.warnings` (dmd/globals.ts), never the status; status 1 still means an escaped error (`Internal
   error:`), a handler that threw `FatalError`, or a failed ImportC file (below).
-- **The output up to the first fatal point is ldc2's; what follows has no oracle.** The CLI's output is a byte
-  prefix of the editor's on the same arguments (the recovery tests check it against ldmd2). Past that point
-  djs prints diagnostics ldc2 never reaches, and some repeat: a failed import is reported once by the import's
-  importAll and again by its semantic (`dsymbolsem.d:8348`, `:3498`), "unable to read module" twice; past the
-  error limit every error prints and is followed by the `error limit (N) reached` line again (`errors.d:489-492`),
-  so a host passes `-verrors=0`. Tests pin such text only as djs's own, never as oracle output (§1.9, §5.4).
+- **The output up to the first error is ldc2's; what follows has no oracle.** An error reported to the editor does not
+  switch analysis off elsewhere. The frontend tests that skip analysis or a report when any error was reported (`if
+  (global.errors)`: `needCopyOrMoveCtor`, `clone.d:1688`, also reached by `isPOD`, `dsymbolsem.d:1696`; the deferred
+  semantic2 and semantic3 loops, `dsymbolsem.d:819`, `:837`; `templatesem.d:3001` under gag; `typesem.d:4405`) read in
+  editor mode only the gagged errors of the gag windows open now (dmd/errors.ts `analysisSeesErrors`, over djs's
+  `Global.windowErrors`, which `endGagging` restores and which, unlike D's `gaggedErrors`, an instance with errors
+  matched ungagged does not raise, `templatesem.d:1021-1022`), as a compile without the errors reported to the editor
+  does; the CLI reads `global.errors`, as ldc2. In a compile without ungagged errors the two readings are equal, so the
+  outputs agree up to the first error; past it the editor analyses what ldc2 skips: after a parse error in the root a
+  library struct still gets its copy constructor, with its postblit's deprecation and its errors, `__traits(isPOD)` and
+  `__traits(hasCopyConstructor)` answer as without the error, the end-of-compile semantic2/semantic3 lists are analysed
+  whole (a cost where they are long: corpus fail12255.d, fresh, about 5x the CLI reading's time), an independent
+  `__traits` that gives no type is reported (corpus e7804_2.d: its second line). `templatesem.d:3001` at gag level 0
+  keeps D's reading: there a parentless symbol is the trace of an error and the report would be its cascade (corpus
+  fail86.d). A struct whose `__ctor` chain holds a symbol that is neither a constructor nor a template (first,
+  `searchCtor`'s "`__ctor` is not allowed", `expressionsem.d:19610`; after a constructor, where the search asserts)
+  looks for no copy constructor (clone.ts `ctorChainHoldsOther`). Past the fatal points djs also prints diagnostics ldc2
+  never reaches, and some repeat: a failed import is reported once by the import's importAll and again by its semantic
+  (`dsymbolsem.d:8348`, `:3498`), "unable to read module" twice; past the error limit every error prints and is followed
+  by the `error limit (N) reached` line again (`errors.d:489-492`), so a host passes `-verrors=0`. Tests pin such text
+  only as djs's own, never as oracle output (§1.9, §5.4). The mode is the handler's: any handler but the CLI's
+  `throwFatalError` (none is the tests' harness, read as the CLI) is editor mode from the compile's start, before any
+  `fatal()`.
 - **Pass `-o-`.** Past a fatal point an object file would reach the codegen wall (`Internal error`).
 - **A failed ImportC file stops as the CLI does**: an imported `.c`/`.h` or one on the command line gives status
   1 and the CLI's output. Its first `fatal()` (`driver/cpreprocessor.cpp:22`, `:42`, `:167`, `driver/tool.cpp:133`,
@@ -1294,8 +1311,8 @@ field it uses changed.
   (dmd/errors.ts); `DjsOptions`: the doc-comment knob ("Queries" below) and `texts`, the text override (below).
 - `djsMainKept(args, onFatal, options)`, `KeptCompile`, `dropKeptState()` (src/djs.ts; the kept-module engine below).
 - `queryHover`, `queryDefinition`, `querySemanticTokens`, `queryInlayHints`, `queryInactiveRanges`, `STALE_REASON`,
-  the legend `SEMANTIC_TOKEN_TYPES` and `SEMANTIC_TOKEN_MODIFIERS`, and their answer types (src/query.ts, exported by
-  src/djs.ts; "Queries" below).
+  `INACTIVE_REASON`, the legend `SEMANTIC_TOKEN_TYPES` and `SEMANTIC_TOKEN_MODIFIERS`, and their answer types
+  (src/query.ts, exported by src/djs.ts; "Queries" below).
 - `queryAst(file, text)` and `AstAnswer`, `AstResult`, `AstEntry`, `DeclarationSite`: the AST view ("Queries" below),
   which reads the engine's record of generated identifiers (src/keep.ts `keepGeneratedNames`).
 - `queryInstances(files)` and `InstancesAnswer`, `InstancesResult`, `TemplateInstances`, `InstanceSite`.
@@ -1333,7 +1350,12 @@ Changes per baseline:
   `completion` request); the import tree bundled with djs in place of the Prefix install's, and `--djs-ldc=<root>`
   (the extension's `djs.ldcRoot`); the host's triple from Node's platform and arch, with an unsupported host refused
   without `-mtriple`, and the arm64 Mac accepted as a `-mtriple` (§4.8; the extension's `djs.target`); the completion
-  without a dot (the same `completion` request answers with the names in scope, `CompletionItem.group` 3 added).
+  without a dot (the same `completion` request answers with the names in scope, `CompletionItem.group` 3 added); editor
+  mode's analysis past the first error (the tests of the error count read gagged errors only, `analysisSeesErrors`:
+  the output past the first error is no longer the CLI's continued); the hover, the definition, the signature help, the
+  references and the rename miss in an inactive branch with `INACTIVE_REASON` (the extension shows nothing there; a
+  rename's refusal shows its reason); the completion items' order in a group, by label ignoring case and a name with a
+  leading `_` last (the extension keeps djs's order: its `sortText` is the item's index).
 
 **The text override.** `DjsOptions.texts` (src/djs.ts), a map from absolute path to a D source's text (an editor's
 buffer, no byte order mark), replaces those files' contents for one call of `djsMain` or `djsMainKept`: a module whose
@@ -1389,13 +1411,16 @@ Guarantees, the merge gate (ruling of Paolo 9/10):
   `__FILE_FULL_PATH__` from another working directory, a changed command line: analysed again as in a fresh
   compile. A kept module the compile does not reach stays out of the module tree (an import added then dropped is
   "undefined identifier" again).
-- **Dropped where another module's analysis wrote into it.** Two writes of one module's analysis into another
+- **Dropped where another module's analysis wrote into it.** Three writes of one module's analysis into another
   module's analysed state cannot be taken back, so the module written is dropped and analysed again: a member a
   selective import marked with errors (not visible, `dsymbolsem.d:3571-3574`: a fresh compile starts without the mark
-  and reports the error again), in the next compile, with the modules that requested its analysis; and a C struct
-  that another C module's struct compared with itself before its size was final (`dsymbolsem.d:4915`, the field list
-  that `finalizeSize` then rebuilds without the anonymous bit-fields, `dsymbolsem.d:10171` and `:8689-8693`), in every
-  compile that analyses that module again.
+  and reports the error again), in the next compile, with the modules that requested its analysis; a C struct that
+  another C module's struct compared with itself before its size was final (`dsymbolsem.d:4915`, the field list that
+  `finalizeSize` then rebuilds without the anonymous bit-fields, `dsymbolsem.d:10171` and `:8689-8693`), in every
+  compile that analyses that module again; and a member that another container's unit found before the module's
+  semantic1 (`dsymbolsem.d:8035`, a lookup above the `import`, where importAll made the module searchable) and analysed
+  by its use, in every compile that analyses that unit again: its live lookup then finds the member unanalysed, as a
+  fresh compile does (keep.ts `keepFound`).
 - **Known divergence: a D struct's anonymous bit-field.** `determineFields` (`dsymbolsem.d`) lists an anonymous
   bit-field among the fields, and `finalizeSize` rebuilds the list without it (`setFieldOffset`). A fresh compile
   where a live unit reads the struct's fields before its size is final (`S.tupleof` in a root edited since) sees the
@@ -1403,39 +1428,50 @@ Guarantees, the merge gate (ruling of Paolo 9/10):
   fewer (`int a : 3; int : 5; int b;`: `S.tupleof[2]` is out of bounds kept, not fresh). Finalizing a D aggregate's
   size is not a unit, so nothing takes it back; a fix needs shadow state for `sizeok` and `fields` and finalization
   run again where a fresh compile runs it. An unchanged recompile is unaffected (the reading unit replays).
-- **Dropped where it skipped analysis after an error.** Some frontend tests read whether any error was reported
-  (`global.errors`) and skip analysis when one was. A unit that ran where the count was above zero only from errors
-  reported ungagged before it, and whose skipped analysis had a result, is dropped by the next compile and runs again
-  (keep.ts `keepErrorState`): an instance made after the root's error looked for no copy constructor (`clone.d:1688`,
-  where the struct has a constructor or a field with a copy or move constructor, clone.ts `keptCtorsSkipped`; none
-  generated, the postblit's deprecation not printed) or did not report a `__traits` that gives no type
-  (`typesem.d:4405`). A library struct whose `isPOD` answer another module's analysis cached after an error
-  (`dsymbolsem.d:1696`, the same test) drops its module. It covers the CLI path (a compile stopped by a semantic error,
-  then the root fixed) and the compile after an editor's fresh compile of a broken buffer. Its cost falls on that
-  compile: dgpro07 labsensor, a fresh compile of the root with a parse error, then the fixed root: the drop seeds 29
-  containers and the kept compile aborts (a lookup into a kept module before its semantic), 17.1 s with the fresh
-  compile that follows against 0.7 s kept, at load 5; the next compile keeps (0.7 s).
-- **Known divergence: the error state.** The reverse: a unit recorded where the count was zero replays as it ran in a
-  compile that has already reported an error, where a fresh compile skips that analysis, and a struct's `isPOD` answer
-  cached by a compile without errors answers one with errors. In editor mode a kept compile of a root with a parse error
-  (the pause compile of a half-typed line), after a good compile, prints a deprecation the fresh compile does not
-  (dgpro07 labsensor: `struct CameraRecorder` "implicitly-generated postblit hides copy constructor") and its AST view
-  differs (generated names numbered otherwise). The CLI path reaches it too, where the output is ldc2's: an instance
-  kept from a good compile and first requested after the root's semantic error prints the postblit's deprecation, which
-  ldc2 does not, and `__traits(isPOD, S)` of a struct with a copy constructor, asked after the error, answers `false`,
-  where ldc2 answers `true`. Outside every unit, the end-of-compile semantic3 loop (`dsymbolsem.d:837`) stops at its
-  first entry after an error, and the kept instances it skips keep their analysed bodies: after an error in the root,
-  the AST view shows druntime's `_d_aaEqual` instances analysed, where a fresh compile leaves them unanalysed (the
-  output is a fresh compile's). The other tests of the count, the semantic2 loop (`dsymbolsem.d:819`, reached inside the
-  root's semantic3 only) and `templatesem.d:3001`, no reproducer shows changing a kept unit. Rejected fixes: dropping
-  the units that cross those tests sent a kept labserver compile after a semantic error in the root fresh (48-53 s);
-  analysing past a returned `fatal()` as without errors hid gagged errors and asserted in `findMoveAndCopyConstructors`
-  on a struct with a member named `__ctor`.
+- **Dropped where it skipped analysis after an error: the CLI's path.** Some frontend tests read whether any error was
+  reported and skip analysis when one was (dmd/errors.ts `analysisSeesErrors`; "Editor mode" above). A unit that ran
+  where the count was above zero only from errors reported ungagged before it, and whose skipped analysis had a
+  result, is dropped by the next compile and runs again (keep.ts `keepErrorState`): an instance made after the root's
+  error looked for no copy constructor (`clone.d:1688`, where the struct has a constructor or a field with a copy or
+  move constructor, clone.ts `keptCtorsSkipped`; none generated, the postblit's deprecation not printed), did not
+  report a `__traits` that gives no type (`typesem.d:4405`) or returned silently at `templatesem.d:3001`. A library
+  struct whose `isPOD` answer another module's analysis cached after an error (`dsymbolsem.d:1696`, the same test)
+  drops its module, also where the errors were gagged ones of an open window, in either mode. Ungagged errors reach
+  these tests in the CLI (a kept compile with the CLI's handler, the corpus `--recompile` lane: a compile stopped by a
+  semantic error, then the root fixed) and, in editor mode, only `templatesem.d:3001` at gag level 0, an
+  error-recovery path; so the editor's fresh compile of a broken buffer costs the next compile no drop.
+- **Gagged errors at a unit's entry.** The same tests read the gagged errors of the open windows, in both modes: an
+  instance first made inside `__traits(compiles, { undefinedY(); Box!int b; })` after the gagged error looks for no
+  copy constructor, one made outside it does. A unit records whether such errors were counted at its entry and
+  whether it read one of the tests where only they could make the answer true (`keepReadErrors`: a struct whose
+  search may set a flag, a deferred loop with entries left, `templatesem.d:3001` under gag, `typesem.d:4405`); such a
+  unit replayed under the other state aborts (keep.ts `replayUnit`, "replayed with gagged errors before it, recorded
+  otherwise"), one that read none replays under either, and the units it requested check their own entry. A
+  replayed unit puts back, before each request inside the gag windows it opened, the gagged errors those windows held
+  when recorded (`enterWindow`), and a replayed match counts the instance's errors again as the live match path does
+  (`keptInstanceMatch`), so an unchanged recompile, and a request that did not move, reads its recording's state; the
+  abort needs a reading unit's first request moved between such contexts.
+- **Known divergence: the error state of the CLI's kept compiles.** The reverse of the drop above: a unit recorded
+  where the count was zero replays as it ran in a compile that has already reported an ungagged error, where a fresh
+  CLI compile skips that analysis, and a struct's `isPOD` answer cached by a compile without errors answers one with
+  errors. An instance kept from a good compile and first requested after the root's semantic error prints the
+  postblit's deprecation, which ldc2 does not, and `__traits(isPOD, S)` of a struct with a copy constructor, asked
+  after the error, answers `false`, where ldc2 answers `true`; the end-of-compile semantic3 loop (`dsymbolsem.d:837`),
+  outside every unit, stops at its first entry after an error, and the kept instances it skips keep their analysed
+  bodies. Editor mode does not reach it: there the tests read what the recording read. Rejected fixes: dropping the
+  units that cross those tests sent a kept labserver compile after a semantic error in the root fresh (48-53 s);
+  analysing past a returned `fatal()` as without errors hid gagged errors and asserted in
+  `findMoveAndCopyConstructors` on a struct with a member named `__ctor`.
+- **Known divergence, no reproducer: `ErrorExp.get` under gag.** In a compile without errors it reports "unknown,
+  please file report" gagged (`expression.d:677`, D's reading kept: ungagged, the editor's would print it after
+  every error); a unit recorded so and replayed into an editor compile with ungagged errors replays that gagged
+  report, where a fresh compile makes none, and the window's gagged count differs.
 - **A visible fallback.** Whenever the call compiles fresh it says why (`reason`): the first call, `the command line
-  changed`, `the host options changed` (`DjsOptions.docComments`; not `texts`), `refused flag <f>: <why>`, `a C
-  source file on the command line`, `the C preprocessor writes for <file>` (its output goes to the inherited stderr,
-  which only a fresh compile's run gives), `the previous compile stopped inside a pass` (a FatalError or an escaped
-  error inside a unit), `nothing to keep`, `object.d is not kept`, `RSS above 6 GiB`, or `abort: <what>` (below).
+  changed`, `the host options changed` (`DjsOptions.docComments`, or editor mode against the CLI's handler; not
+  `texts`), `refused flag <f>: <why>`, `a C source file on the command line`, `the C preprocessor writes for <file>`
+  (its output goes to the inherited stderr, which only a fresh compile's run gives), `the previous compile stopped
+  inside a pass` (a FatalError or an escaped error inside a unit), `nothing to keep`, `object.d is not kept`, `RSS
+  above 6 GiB`, or `abort: <what>` (below).
 - **Memory.** Flat across edits of one file: dropped objects leave the instance tables, the type table, the Loc file
   table, the generated-name counters (those of a dead file or a dead parent) and the CTFE global values; an
   instance that no kept unit and no compile of the last four requested is dropped.
@@ -1499,7 +1535,25 @@ ran did no work, and it deferred nothing itself) holds nothing of them in its lo
 symbols than recorded (an import added whose struct waits for another's size while a kept instance is first requested,
 or dropped again), and retries this compile's ones at the end of its replay, where a retry that does no work proves that
 the fresh compile's retries inside the unit did none, since a deferred symbol's analysis only gets further as the work
-around it goes on (keep.ts `probeRetry`); its record then names this compile's symbols. The next compile resets each
+around it goes on (keep.ts `probeRetry`); its record then names this compile's symbols, and the unit remembers that list
+and the recorded one as proved (`prove`): a later replay entered with one of them holds without the retry. The retry of
+a list seen before can refuse what a fresh compile does: an import dropped and added again, whose kept analysis puts
+back among the deferred symbols a struct of a kept instance analysed already (no shadow state takes a struct's guard
+back), where a fresh compile's is still deferred, and the retry finds it done (`std.json` added again to the edit list's
+program, at load 4-5: kept in 65-85 ms, against 3.5-3.7 s for the abort and the fresh compile). The later replay does
+not repeat the proof: it takes the list's symbols to be where they were when a retry of them did no work, at a unit
+whose log does not depend on them. A retry made inside an outer one returns at once, a fresh compile's inside the unit
+too: it proves nothing, and the list is neither noted nor recorded as the unit's; no list is proved, nor a proved one
+used, while open gag windows hold gagged errors, which a retry's work may read. A unit keeps the last four lists, the
+one a replay matched moved last; a list naming a symbol of a module or instance a compile drops goes at that compile's
+end (`dropStaleProofs`), so no list keeps an edited module's AST alive: the cost is those arrays, few symbols each (the
+`std.json` toggle: about 20 units, lists of three at most). Whether a unit runs inside a retry (`dsymbolsem.d:762`
+`nested`: its own retries return at once, its log holds none) is a replay condition both ways (keep.ts
+`UnitRec.nested`): a unit whose work changes the deferred symbols, replayed in the other state, aborts; another,
+recorded inside one and replayed outside one with deferred symbols or symbols it defers, is probed the same way, since a
+fresh compile's retries inside it run. A replay runs no retry: the requests a recorded retry made replay in the state
+their log recorded (each request event carries it, keep.ts `nestedNow`).
+The next compile resets each
 kept unit's guard to its value before the unit (the shadow state), so every caller that would run it reaches it, and its
 first request replays the log there. A function's semantic3 that inferred its return type has a second guard, the return
 type itself, which the shadow state does not take back (the function's type keeps what its analysis set): while that
@@ -1520,8 +1574,11 @@ replay: changed modules, modules whose parse reported or read the clock, the uni
 errors, reports in changed files, and to a fixpoint every unit that requested a dropped one, every instance over a
 dropped symbol, every AA TypeInfo declaration over one (key and value types, object.d's `TypeInfo_AssociativeArray`) or
 analysed from a dropped scope (the requesting code's module, instance and root module, which the declaration must not
-keep alive), and every unit entered from a dropped module's scope (an instance's members keep the instantiating call's
-scope, `callsc`); then every AA TypeInfo declaration whose type left the table through an entry a dropped unit created.
+keep alive), every unit entered from a dropped module's scope (an instance's members keep the instantiating call's
+scope, `callsc`), and every module whose own member a dropped container's unit found before the module's semantic1
+(keep.ts `peeks`: a lookup above the import of a widely imported module drops that module, and what it brings down,
+with every edit of the finder: a 31-module hub, ~2.2 s kept against 0.4 s with the line below the imports, at load
+6-7); then every AA TypeInfo declaration whose type left the table through an entry a dropped unit created.
 A dropped AA TypeInfo declaration whose type stays is not replaced: its semantic3 runs for real again. What a parse does
 belongs to its module, not to the unit that loaded it: a kept module is registered, not parsed, at its first load in a
 compile, from a unit that runs or one that replays, and the registration adds the generated-identifier numbers its parse
@@ -1530,34 +1587,40 @@ symbol table to the module tree (`dmodule.d:190-212`; made there when its import
 members, `dsymbolsem.d:8412`): before a kept compile the table loses the tree's entries, or goes when no importAll ran
 on it, and the next use puts them back. Work outside every unit is not replayed, it runs again: so a guard it leaves on
 a kept object is emptied before the next kept compile (an aggregate's `getRTInfo` set by the end-of-compile semantic3,
-keep.ts `keepRTInfo`).
+keep.ts `keepRTInfo`; the pass guard of `main`'s `mixin _d_cmain!()`, whose passes 2 and 3 run in the module passes'
+tails after the parsed members, back to its first pass done, so those tails request its functions' kept units again: C
+`main`'s semantic3, which names `_Dmain`; left at its last pass, the functions stayed in their shadow state and
+`queryUnused` reported `_Dmain` after an unchanged recompile).
 
 Abort: a kept compile buffers stdout, stderr and the handler's calls. A replay that finds the kept state wrong for this
 compile (a request in another state than recorded: an import cycle entered from the other side, with output; a gag or
-`-de` state or an instance's `gagged` other than recorded, with output; other deferred symbols than recorded at a unit
-whose own work changes them, or whose retry of this compile's ones, at the end of its replay, does work (a symbol
-analysed already that a kept module's replay puts back among them, where a fresh compile's is still deferred: an import
-dropped and added again); a printed generated name (`__r3`) while the generated-identifier counter differs from the
-recording's at a replayed unit or registered parse that consumed some, found at that unit's replay or, when the
-difference comes later, at the end of the compile; at the end of the compile, a string this compile made, by a unit run
-or replayed, that names
-a generated identifier by the number its recording gave it where this compile gave it another (`__traits(allMembers)` of
-a kept struct with an anonymous bit-field, `__anonBitField3`; a kept lambda's `.stringof` with its `__T4`: the StringExp
-constructor's hook keeps the strings that look generated, `keepString`, and their words are looked up among the
-spellings of the identifiers this compile numbered otherwise, so an instance's mangle, a lambda's location name or a
-CTFE-built `__x1` do not count); an instance's semantic2/3 before its creation in this compile; a request that created
-an instance when recorded and matches it in this compile, or the reverse, while the instance's pending semantic2/3
-prints (a creation runs them at once, `templatesem.d:1369`, `:1381`, a match does not); a C type merged into the entry
-of a module not loaded or loaded after its own, or a module that took another's C types loaded without it; a merge
-reading a kept C struct whose size a fresh compile has not finalized there, or that no unit finalized; a deferral of a
-symbol not kept; a request of an AA TypeInfo declaration not kept, or first requested without a scope, or of its
-semantic3 from a unit; a lookup into a kept module before its semantic; a module tree conflict; a kept module used as a
-package whose symbol table is not a fresh compile's there (its members' exactly when its importAll has run in this
-compile), or whose importAll replays without the use that made its table; a new module named as a kept one; a C
-preprocessor run that writes), and any crash during a kept compile, throws: the buffer is dropped, the call compiles
-fresh and its `reason` is `abort: <what>`. Two differences go on, since they change nothing printed: a request in
-another state where neither unit nor what it requests prints (it goes as in a fresh compile: the pending unit replays,
-the running one does not), and a replay under another gag state whose log prints nothing the gag would change.
+`-de` state or an instance's `gagged` other than recorded, with output; gagged errors counted at the entry of a unit
+that read a test of the error count by them where its recording had none, or the reverse; other deferred symbols than
+recorded at a unit whose own work changes them, or whose retry of this compile's ones, at the end of its replay, does
+work (a symbol analysed already that a kept module's replay puts back among them, where a fresh compile's is still
+deferred, in a list not proved for the unit); a printed generated name (`__r3`) while the generated-identifier counter
+differs from the recording's at a replayed unit or registered parse that consumed some, found at that unit's replay or,
+when the difference comes later, at the end of the compile; at the end of the compile, a string this compile made, by a
+unit run or replayed, that names a generated identifier by the number its recording gave it where this compile gave it
+another (`__traits(allMembers)` of a kept struct with an anonymous bit-field, `__anonBitField3`; a kept lambda's
+`.stringof` with its `__T4`: the StringExp constructor's hook keeps the strings that look generated, `keepString`, and
+their words are looked up among the spellings of the identifiers this compile numbered otherwise, so an instance's
+mangle, a lambda's location name or a CTFE-built `__x1` do not count); an instance's semantic2/3 before its creation in
+this compile; a request that created an instance when recorded and matches it in this compile, or the reverse, while the
+instance's pending semantic2/3 prints (a creation runs them at once, `templatesem.d:1369`, `:1381`, a match does not); a
+C type merged into the entry of a module not loaded or loaded after its own, or a module that took another's C types
+loaded without it; a merge reading a kept C struct whose size a fresh compile has not finalized there, or that no unit
+finalized; a deferral of a symbol not kept; a request of an AA TypeInfo declaration not kept, or first requested without
+a scope, or of its semantic3 from a unit; a lookup into a kept module before its semantic that finds its own member or a
+symbol through imports its semantic changed (one that finds nothing goes on: a fresh compile's misses too); a
+package-qualified name checked through a kept module before its semantic whose imports or package access are not its
+importAll's; a module tree conflict; a kept module used as a package whose symbol table is not a fresh compile's there
+(its members' exactly when its importAll has run in this compile), or whose importAll replays without the use that made
+its table; a new module named as a kept one; a C preprocessor run that writes), and any crash during a kept compile,
+throws: the buffer is dropped, the call compiles fresh and its `reason` is `abort: <what>`. Two differences go on, since
+they change nothing printed: a request in another state where neither unit nor what it requests prints (it goes as in a
+fresh compile: the pending unit replays, the running one does not), and a replay under another gag state whose log
+prints nothing the gag would change.
 
 What a kept compile keeps, against `deinitializeFrontend` (each justified at `resetForKeptCompile`, src/djs.ts): the
 identifier table, `Id`, `Type.stringtable`, the Loc file table, `Package.packageTag`, the CTFE stack's global values,
@@ -1568,23 +1631,33 @@ is reset as for a fresh compile.
 
 The proofs: src/keep.test.ts (each kept compile against `djsMain`: a library deprecation with its trace after the root
 moved, the four edit patterns of §4.6, an instance made after an error in the root and made again once it is fixed
-(`clone.d:1688`, `typesem.d:4405`) and a library struct's `isPOD` answered after an error, a root changed to a module
-importing it, a kept module edited, dip1000, the parse's generated names, a module first reached through another import,
-a package.d after its submodules, a kept
-module's import whose package another import had put in the tree, a module's location, a function pointer type of the
-previous root, deferred semantic3, a module appearing, an import added whose struct is deferred where a kept instance
-that retries the deferred symbols is first requested, then dropped, an edited root still calling an imported `auto`
-function, `-i` (a compiled import's bodies with the root and then the compiled import edited, an import added then
-dropped, `-i=` patterns, the root inferring a compiled import's `auto` function and method before its semantic3), string
-imports, the clock, the working directory, a C module edited and one imported for the first time, the diagnostic
-handler's calls, an
+(`clone.d:1688`, `typesem.d:4405`) and a library struct's `isPOD` answered after an error, in editor mode a parse error
+after a good compile, semantic errors under `-verrors=2` and in another root, a root parse error with a semantic error
+in an imported and in a locally imported module, an instance with errors requested twice ungagged, a gagged error then a
+kept instance requested in the same window recompiled unchanged in both modes, gagged errors that still skip, a struct
+with a function named `__ctor`, a mixin's copy constructor under each attribute and a `std.traits` instance through a
+semantic error and its fix, a root changed to a module importing it, a kept module edited, dip1000, the parse's
+generated names, a module first reached through another import, a package.d after its submodules, a kept module's import
+whose package another import had put in the tree, a module's location, a function pointer type of the previous root,
+deferred semantic3, a module appearing, an import added whose struct is deferred where a kept instance that retries the
+deferred symbols is first requested, then dropped, a struct an instance's creation deferred and the module's retry
+completed before the next instance that retries them, the same through a library's alias analysed at its first use,
+a lookup that passes through a kept module before its semantic and finds nothing there (another import has the name),
+one through its importAll's public import where its semantic added a private one, a library struct the root
+analysed before the library's semantic and a private selective import's alias found before its module's semantic,
+each dropped with the root edited, an edited root still calling an imported `auto` function, `-i` (a
+compiled import's bodies with the root and then the compiled import edited, an import added then dropped, `-i=`
+patterns, the root inferring a compiled import's `auto` function and method before its semantic3), string imports, the
+clock, the working directory, a C module edited and one imported for the first time, the diagnostic handler's calls, an
 unchanged recompile of seven dmd corpus cases (a root that is its own `object` with an AA type and a
 `TypeInfo_AssociativeArray` without the hooks, two; a selective import of members not visible under `-de`; an overload
 set across two imports; C structs of one name from two imports, a bit-field's name differing; a root module whose name
 another root uses as a package, two), what the end-of-compile semantic3 analyses (an AA type's TypeInfo after lines
 inserted above the type, after the module that first named the type was dropped, after the type's first merge moved to
 another kept module or into a template's body merged already, and with its creating request moved to an edited module; a
-library struct's RTInfo), and the fresh cases: a refused flag, a changed command line, a root whose parse reported, a
+library struct's RTInfo), and the fresh cases: a refused flag, a changed command line, a root whose parse reported,
+a lookup through an import that a kept module's semantic added or made public, before that semantic, and a
+package-qualified name checked through a kept module whose semantic opened the package, before it, a
 printed generated name moved, a value made of one (`__traits(allMembers)` of an anonymous bit-field), the same made by a
 live unit from a kept module's names, strings that only look generated keeping the compile kept, an unchanged recompile
 renumbering nothing with a parse inside a unit's numbers, a kept C module whose preprocessor writes, a C module read by
@@ -1592,23 +1665,24 @@ a kept compile whose preprocessor writes, an instance created by a request in on
 or the reverse, under `-i` and with two command-line roots, two C modules' types of one name, two C shims including one
 header, a C struct merged with a kept one whose size a fresh compile has not finalized there, a root added that names a
 kept root as its package, an imported module named as a package after its importAll, that import added again, whose kept
-module puts back a deferred symbol analysed already, the abort path); the corpus `--in-process --keep` (§4.5), which
-also exercises what has no test of its own (a module's resolution changed, the lazy alias unit, the `minst` writes an AA
-TypeInfo's replay makes, the deferral its creation's replay skips; a crash during a kept compile has no reproducer), and
-its `--recompile` lane, alone and with `--editor`, which compiles every test again
-unchanged in the same child: every kept second compile prints what the first printed (under `--editor`, four tests that
-stop at a known non-return of editor mode, above, differ between two fresh compiles); the edit list of
-tests/phobos/editloop.ts through `--sequence ... --keep` (§4.6); and the dgpro07 labserver probe (a fresh compile ~29-31
-s, 2.2-2.3 GiB RSS; kept, the root unchanged 0.33-0.41 s, the root edited 0.83-0.84 s back to back and 1.07-1.13 s after
-a forced full GC; heap after GC flat over 100 saves; under `-i`, at load under 4, a fresh compile ~35 s, kept 0.44-0.51
-s with the root unchanged and 0.58-1.25 s with the root, a compiled import or the C shim edited, 2.2-2.6 GiB RSS;
-without `-i` an edit of the C shim's code, read again by the kept compile, 0.92-1.02 s; the record of each unit's
-generated identifiers for the AST view, `keepGenerated`, +5-6 MiB of heap after GC under `-i` (1193 to 1198 MiB after a
-fresh compile), save times within 2% (six alternating saves, 862-1161 ms against 877-1182 ms); labsensor's C shim shares
-header types with a C module loaded after it, so its edit aborts, `keepMergeFound`). The corpus's nine `-i` tests run
-with other command lines than their neighbours, so the corpus run keeps none of them; a one-off probe compiled each
-twice in one process, the second call kept and equal to fresh, which covers only a recompile of unchanged files: the
-edits under `-i` are keep.test.ts's and the five modules'.
+module puts back a deferred symbol analysed already, an instance replayed with gagged errors before it where its
+recording had none, editor mode against the CLI's handler, the abort path); the corpus `--in-process --keep` (§4.5),
+which also exercises what has no test of its own (a module's resolution changed, the lazy alias unit, the `minst` writes
+an AA TypeInfo's replay makes, the deferral its creation's replay skips; a crash during a kept compile has no
+reproducer), and its `--recompile` lane, alone and with `--editor`, which compiles every test again unchanged in the
+same child: every kept second compile prints what the first printed (under `--editor`, four tests that stop at a known
+non-return of editor mode, above, differ between two fresh compiles); the edit list of tests/phobos/editloop.ts through
+`--sequence ... --keep` (§4.6); and the dgpro07 labserver probe (a fresh compile ~29-31 s, 2.2-2.3 GiB RSS; kept, the
+root unchanged 0.33-0.41 s, the root edited 0.83-0.84 s back to back and 1.07-1.13 s after a forced full GC; heap after
+GC flat over 100 saves; under `-i`, at load under 4, a fresh compile ~35 s, kept 0.44-0.51 s with the root unchanged and
+0.58-1.25 s with the root, a compiled import or the C shim edited, 2.2-2.6 GiB RSS; without `-i` an edit of the C shim's
+code, read again by the kept compile, 0.92-1.02 s; the record of each unit's generated identifiers for the AST view,
+`keepGenerated`, +5-6 MiB of heap after GC under `-i` (1193 to 1198 MiB after a fresh compile), save times within 2%
+(six alternating saves, 862-1161 ms against 877-1182 ms); labsensor's C shim shares header types with a C module loaded
+after it, so its edit aborts, `keepMergeFound`). The corpus's nine `-i` tests run with other command lines than their
+neighbours, so the corpus run keeps none of them; a one-off probe compiled each twice in one process, the second call
+kept and equal to fresh, which covers only a recompile of unchanged files: the edits under `-i` are keep.test.ts's and
+the five modules'.
 
 #### Queries
 
@@ -1634,17 +1708,18 @@ compile that numbered generated identifiers otherwise (`__r12`), every query pri
 a hint's types; the semantic tokens and the inactive ranges print no name. The answer is `{ result }` or a miss `{
 result: null, stale, reason }`: the file is not in the last compile; `stale`, with `STALE_REASON`, when `text` is not
 the text that compile read (`Module.src` less a UTF-8 byte order mark: every position would be wrong; not a
-completion's, below); no identifier, or no symbol, at the position. A hover carries dmd's kind (`parameter`, `field`,
-`local variable` for variables), the qualified name (`toPrettyChars`), the identifier's range and Markdown: the
-signature or type in a ` ```d ` block, the template instance the symbol belongs to (and, at a position inside a
-template, how many instances answer there: the first one does), the deprecation and its message, the doc comment split
-by `DocComment.parse` (dmd/doc.d:234) and rendered (summary, description, Params as a list, Returns, Throws, See_Also
-and other sections by name; `$(D x)`, `$(D_PARAM x)`, `$(REF x, ...)`, `$(LREF x)` as code, other macros as their
-arguments' text); a member of a template instance, whose copy carries no comment, shows its template's; a `ditto`
-comment shows the previous documented declaration's in the same scope. A definition carries the declaring file as the
-compiler names it and the declaration's identifier; a module, its file's start; a symbol declared in a string mixin,
-its name inside the mixin's literal when that literal is the mixin's whole argument and holds no escape sequence (the
-bytes the mixin parsed), else the `mixin` keyword when its line has one; a symbol without a location, or one of a
+completion's, below); no identifier, or no symbol, at the position; for the hover, the definition, the signature help,
+the references and the rename, the position in an inactive branch (`INACTIVE_REASON`, below). A hover carries dmd's kind
+(`parameter`, `field`, `local variable` for variables), the qualified name (`toPrettyChars`), the identifier's range and
+Markdown: the signature or type in a ` ```d ` block, the template instance the symbol belongs to (and, at a position
+inside a template, how many instances answer there: the first one does), the deprecation and its message, the doc
+comment split by `DocComment.parse` (dmd/doc.d:234) and rendered (summary, description, Params as a list, Returns,
+Throws, See_Also and other sections by name; `$(D x)`, `$(D_PARAM x)`, `$(REF x, ...)`, `$(LREF x)` as code, other
+macros as their arguments' text); a member of a template instance, whose copy carries no comment, shows its template's;
+a `ditto` comment shows the previous documented declaration's in the same scope. A definition carries the declaring file
+as the compiler names it and the declaration's identifier; a module, its file's start; a symbol declared in a string
+mixin, its name inside the mixin's literal when that literal is the mixin's whole argument and holds no escape sequence
+(the bytes the mixin parsed), else the `mixin` keyword when its line has one; a symbol without a location, or one of a
 string built elsewhere on a line of several mixins, no answer.
 
 A hover's last section, after a `---` line, headed `**Resolved**`, says what the analysis made of the code at the
@@ -1858,8 +1933,10 @@ gives its type's value (a field of a `const` or `immutable` value takes the qual
 written or not, when every overload is callable with no arguments: no parameters, all defaulted, or `@property`; one
 return type, not `void`; no template), an aggregate, enum or type alias a type, an import, module or package a scope,
 `[...]` an element type. `range` is the identifier being typed after the dot, in `text`; `moved`, whether `text` differs
-from the compiled one. `items`, one per name, sorted by group then label: `{ label, kind, detail, documentation, group
-}`, `kind` an LSP name (`method`, `function`, `field`, `property`, `variable`, `constant`, `enumMember`, `enum`,
+from the compiled one. `items`, one per name, sorted by group then label (in a group, here and without a dot: the names
+without a leading `_` first, then by the label ignoring case, then by UTF-16 code unit, so that dmd's
+`Expression._init()` comes last among the members of an `Expression`): `{ label, kind, detail, documentation, group }`,
+`kind` an LSP name (`method`, `function`, `field`, `property`, `variable`, `constant`, `enumMember`, `enum`,
 `struct`, `class`, `interface`, `module`, `typeParameter`), `detail` the hover's signature on one line (`(+N overloads)`
 after a member function's first overload), `documentation` the doc comment's summary as `DocComment.parse` splits it
 (the hover's), on one line: of the overload the item shows (a UFCS candidate's, the one taking the receiver), else of
@@ -1970,9 +2047,12 @@ file); a constructor or another special function; a name D calls with no token o
 mixin or without a declaration; one declared in a module the last compile only imports (the bundled import tree, a
 module outside `-i`), whose other users no analysis saw; a name that a string mixin's text spells as a word in a
 searched module (a token string, or a literal in a `mixin (...)`'s arguments: a string built elsewhere and mixed in is
-not seen). The new name must be a D identifier, not a keyword, not starting with `__`, and not one the symbol's scope
-already declares (a template parameter's: not spelled in the template); a clash among a function's locals is not
-checked, and the next compile reports it.
+not seen); a symbol whose name is spelled as a word in an inactive branch of a searched module (the references do not
+look there, and a build for a target that compiles the branch would break; a template parameter's references are textual
+and include them). Not checked: a function body no analysis ran (a template without instances), whose uses the
+references miss too. The new name must be a D identifier, not a keyword, not starting with `__`, and not one the
+symbol's scope already declares (a template parameter's: not spelled in the template); a clash among a function's locals
+is not checked, and the next compile reports it.
 
 The signatures of a call, `querySignatureHelp(file, line, character, text)`: `{ result: { signatures, activeSignature,
 activeParameter } }` or the hover's misses, `not inside a call's parentheses`, `no function at the call`. The call is
@@ -2021,46 +2101,50 @@ keyword, a parameter at its type. At one token, a symbol whose name is the token
 (`__r12`, a `__ctor` call at a struct's name, the implicit `this`), and a compiler-made name never answers. Where the
 analysis leaves no node (an enum member or a manifest constant folded to its value, `S` in `S.f()`, a selective import's
 name), a read-only lookup in the symbol tables (`DsymbolTable.lookup`: the enclosing function's, the enclosing scopes',
-the module's and the modules it imports; after a `.`, the scope of the symbol before it) answers. It does not answer
-where the tables around the position hold other names: in a function body the analysis did not run (a template's own
-members, the branch a `version` or `static if` declaration did not choose, semantic3 not run, a unittest's body without
-`-unittest`, which the parser skips), and with a runtime variable or parameter, which no analysis folds away (the branch
-a `static if` statement did not choose), except in the body of a function whose analysis reported errors
-(`hasSemantic3Errors`): an expression with an error becomes an `ErrorExp` and a statement with one an `ErrorStatement`,
-which its block becomes, so the index holds none of their names, and the editor's function being typed is that case.
-There a name is looked up by position as completion's first link is (the function's locals declared before it, then the
-enclosing scopes), outside the inactive branches; a name found outside the function's locals is not answered when the
-body's text declares that name, names it as an untyped lambda parameter, or holds a `with` statement (scopes no table
-shows). The lookup takes the imports declared in the function bodies holding the name first (a renamed import's name, a
-selective one's, a plain one's module), and at a module what its imports give as dmd's `search` finds it: an imported
-module's own member, else, recursively, what its imports that are not private give (`import std.datetime;` gives
-`Clock`), the symbols not visible from the module left out; after a `.`, a module's or package's members through its
-imports and package.d. Where two imports give different symbols (ldc2 reports an ambiguity, or merges functions into an
-overload set across modules) it answers nothing: the hover has one symbol to show, and picking the first would be a
-guess. A plain import's name answers as its first package (`std` of `std.file.exists`, as the analysis resolves it), a
-renamed import's as the import. A runtime variable answers where the analysis left a node of it under another name, at
-the token or along the chain before it (`cstdio.stdout`, an alias of `__stdoutp`; a Tuple's named field `st.terminated`,
-its `__expand_field_0`). It never answers the words that are no symbol (`exit` in `scope(exit)`). A runtime variable
-before `.sizeof`, `.alignof`, `.mangleof`, `.stringof`, or inside `typeof(...)` (`is(typeof(cl.flag) : bool)`), answers
-(they keep no node of it), outside the inactive branches, and so does a member after it, through a pointer too. A
-template's parameter with no node (its declaration in the parameter list, a constraint, a `static if` condition, a
-template's argument) answers with the argument of the instance whose analysed function holds it, else of the first, the
-count of instances shown. Two names with no symbol answer the hover alone: a built-in property of the operand's type
-(completion's list: kind `property`, its type and the operand's; the operand a basic type's keyword, a string literal,
-or the identifier ending it past calls, indexes and template arguments, or a parenthesised name dereferenced,
-`(*p).length`; the definition misses with `a built-in property has no declaration`), and a parameter named in a function
-or delegate type written in a declaration (`void delegate(int code) cb;`: kind `parameter`, the definition its own
-name). Not answered either: a function of a non-root module without `-i` (semantic3 not run), a `catch` the analysis
-removed (a body that cannot throw: statementsem.d drops its `catch (Exception e)` and the handler), a parenthesised
-operand other than a name dereferenced before a built-in property (`(a + b).length`), symbols inside string mixins. A
-member of a parenthesised operand answers (`(cast(C) o).f`, `(c).f`): the analysis locates the access inside the
-parentheses, and its key is the chain after the `)`. Dgpro07 labserver.d under `-i`, every identifier token outside
-keywords, comments and literals (10093): hover 9414 and definition 9071 answered; outside the 779 tokens of inactive
-branches 9269 of 9314 hovers (99.5%); of the misses there, the words that are no symbol (`version (X)`, `scope(exit)`,
-`@nogc`), 31, the removed `catch` handlers, 13, and a pointer to an array's `.length` (`p.length`), 1; the definition
-misses where a hover answers are packages (213, no declaration) and built-in properties (130). Ops net/node.d's 2567
-tokens in unittest bodies, which the compile skipped, answer nothing (695 answered from the module's tables before).
-Cost: the index 50-100 ms, a later query under 0.1 ms median (~0.5 ms through the djs-vscode worker).
+the module's and the modules it imports; after a `.`, the scope of the symbol before it) answers. The hover, the
+definition, the signature help, the references and the rename answer nothing in an inactive branch (the inactive ranges
+above; `INACTIVE_REASON`, "in a branch not compiled for this target and flags"), as the semantic tokens and the hints
+give nothing there: no analysis ran in it, and the tables around it are the chosen branch's scope, not the one the
+branch would see. Completion still answers there, with the names of the compiled scope at the position: a typing aid,
+not a statement about the branch's code. The lookup does not answer either where the tables around the position hold
+other names: in a function body the analysis did not run (a template's own members, semantic3 not run, a unittest's body
+without `-unittest`, which the parser skips), and with a runtime variable or parameter, which no analysis folds away,
+except in the body of a function whose analysis reported errors (`hasSemantic3Errors`): an expression with an error
+becomes an `ErrorExp` and a statement with one an `ErrorStatement`, which its block becomes, so the index holds none of
+their names, and the editor's function being typed is that case. There a name is looked up by position as completion's
+first link is (the function's locals declared before it, then the enclosing scopes), outside the inactive branches; a
+name found outside the function's locals is not answered when the body's text declares that name, names it as an untyped
+lambda parameter, or holds a `with` statement (scopes no table shows). The lookup takes the imports declared in the
+function bodies holding the name first (a renamed import's name, a selective one's, a plain one's module), and at a
+module what its imports give as dmd's `search` finds it: an imported module's own member, else, recursively, what its
+imports that are not private give (`import std.datetime;` gives `Clock`), the symbols not visible from the module left
+out; after a `.`, a module's or package's members through its imports and package.d. Where two imports give different
+symbols (ldc2 reports an ambiguity, or merges functions into an overload set across modules) it answers nothing: the
+hover has one symbol to show, and picking the first would be a guess. A plain import's name answers as its first package
+(`std` of `std.file.exists`, as the analysis resolves it), a renamed import's as the import. A runtime variable answers
+where the analysis left a node of it under another name, at the token or along the chain before it (`cstdio.stdout`, an
+alias of `__stdoutp`; a Tuple's named field `st.terminated`, its `__expand_field_0`). It never answers the words that
+are no symbol (`exit` in `scope(exit)`). A runtime variable before `.sizeof`, `.alignof`, `.mangleof`, `.stringof`, or
+inside `typeof(...)` (`is(typeof(cl.flag) : bool)`), answers (they keep no node of it), and so does a member after it,
+through a pointer too. A template's parameter with no node (its declaration in the parameter list, a constraint, a
+`static if` condition, a template's argument) answers with the argument of the instance whose analysed function holds
+it, else of the first, the count of instances shown. Two names with no symbol answer the hover alone: a built-in
+property of the operand's type (completion's list: kind `property`, its type and the operand's; the operand a basic
+type's keyword, a string literal, or the identifier ending it past calls, indexes and template arguments, or a
+parenthesised name dereferenced, `(*p).length`; the definition misses with `a built-in property has no declaration`),
+and a parameter named in a function or delegate type written in a declaration (`void delegate(int code) cb;`: kind
+`parameter`, the definition its own name). Not answered either: a function of a non-root module without `-i` (semantic3
+not run), a `catch` the analysis removed (a body that cannot throw: statementsem.d drops its `catch (Exception e)` and
+the handler), a parenthesised operand other than a name dereferenced before a built-in property (`(a + b).length`),
+symbols inside string mixins. A member of a parenthesised operand answers (`(cast(C) o).f`, `(c).f`): the analysis
+locates the access inside the parentheses, and its key is the chain after the `)`. Dgpro07 labserver.d under `-i`, every
+identifier token outside keywords, comments and literals (10093): the 779 tokens of inactive branches answer nothing
+(`INACTIVE_REASON`); of the 9314 outside them, 9269 hovers answer (99.5%); of the misses, the words that are no symbol
+(`version (X)`, `scope(exit)`, `@nogc`), 31, the removed `catch` handlers, 13, and a pointer to an array's `.length`
+(`p.length`), 1; counted over all 10093 tokens when the inactive branches still answered, the definition misses where a
+hover answered were packages (213, no declaration) and built-in properties (130). Ops net/node.d's 2567 tokens in
+unittest bodies, which the compile skipped, answer nothing (695 answered from the module's tables before). Cost: the
+index 50-100 ms, a later query under 0.1 ms median (~0.5 ms through the djs-vscode worker).
 
 The doc-comment knob, `DjsOptions.docComments` (default off): `Module.parse` hands the D parser `doDocComment` as `-D`
 does (`cast(bool) docfile`, dmodule.d:819), through `Module.djsDocComments`, which the driver sets on every call; the

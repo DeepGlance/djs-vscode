@@ -667,11 +667,13 @@ export interface TokenLegend {
 
 /**
  * Worker -> main thread: the worker has imported the compiler and takes requests; `legend` is the compiler's, sent
- * here so that the extension host never loads the compiler to read it.
+ * here so that the extension host never loads the compiler to read it; `compileCache`, the directory of Node's compile
+ * cache active in the worker (`module.getCompileCacheDir()`), null when none is.
  */
 export interface ReadyMessage {
     kind: "ready";
     legend: TokenLegend;
+    compileCache: string | null;
 }
 
 /** Worker -> main thread: the reply to a `Request`, matched by `id` (`DjsCompiler.pending` resolves with it). */

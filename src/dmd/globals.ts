@@ -471,6 +471,16 @@ export class Global {
     gag = 0; /// !=0 means gag reporting of errors & warnings
     gaggedErrors = 0; /// number of errors reported while gagged
     gaggedDeprecations = 0; /// number of deprecations reported while gagged
+    /**
+     * No D counterpart: the gagged errors of the gag windows open now (dmd/errors.ts `analysisSeesErrors`, the
+     * kept-module engine's `replayUnit`). A gagged report counts here as in `gaggedErrors`, and `startGagging` saves it
+     * and `endGagging` restores it, so at gag level 0 it is 0. `gaggedErrors` cannot serve: it also takes the errors of
+     * an instance with errors matched ungagged (dmd/templatesem.d:1021-1022), which then stay counted past every
+     * window; here a match counts only under gag (templatesem.ts).
+     */
+    windowErrors = 0;
+    /** No D counterpart: `windowErrors` at the start of each open window, innermost last. */
+    windowErrorsSaved: number[] = [];
 
     console: unknown = null; /// opaque pointer to console for controlling text attributes (`void*`, 02 §11)
 
@@ -516,6 +526,7 @@ export class Global {
         if (K.on) keepWin(1);   // the kept-module engine: a gag window opened inside the running unit
         ++this.gag;
         this.gaggedDeprecations = 0;
+        this.windowErrorsSaved.push(this.windowErrors);     // no D counterpart: see `windowErrors`
         return this.gaggedErrors;
     }
 
@@ -531,6 +542,7 @@ export class Global {
         // ungagged errors.
         this.errors -= this.gaggedErrors - oldGagged;
         this.gaggedErrors = oldGagged;
+        this.windowErrors = this.windowErrorsSaved.pop()!;  // no D counterpart: see `windowErrors`
         return anyErrs;
     }
 
@@ -539,7 +551,10 @@ export class Global {
      * (globals.d:489). An error message may or may not have been printed.
      */
     increaseErrorCount(): void {
-        if (this.gag) ++this.gaggedErrors;
+        if (this.gag) {
+            ++this.gaggedErrors;
+            ++this.windowErrors;    // no D counterpart: see `windowErrors`
+        }
         ++this.errors;
     }
 

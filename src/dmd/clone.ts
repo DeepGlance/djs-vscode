@@ -43,7 +43,7 @@
 
 import { assert } from "../assert.js";
 import { ds } from "../dstring.js";
-import { K, keepErrorState } from "../keep.js";
+import { K, keepErrorState, keepReadErrors } from "../keep.js";
 import { STC, TRUST, PURE, LINK, MODFlags, TY } from "./astenums.js";
 import type { MOD } from "./astenums.js";
 import { ClassKind } from "./aggregate.js";
@@ -79,7 +79,9 @@ import { Identifier } from "./identifier.js";
 import { Loc } from "./location.js";
 import { global } from "./globals.js";
 import { EXP, TOK } from "./tokens.js";
-import { deprecation, deprecationSupplemental, error, errorSupplemental } from "./errors.js";
+import {
+    analysisSeesErrors, deprecation, deprecationSupplemental, editorMode, error, errorSupplemental,
+} from "./errors.js";
 // Value imports read post-load, only inside bodies (01 Rule 4.3): the semantic drivers every
 // generated member is pushed through.
 import { addMember, dsymbolSemantic, search } from "./dsymbolsem.js";
@@ -1765,9 +1767,52 @@ function findMoveAndCopyConstructors(ctor: Dsymbol, copyCtor: Ref<CtorDeclaratio
 }
 
 /**
+ * Editor mode (`needCopyOrMoveCtor`): whether the struct's `__ctor` chain, from its symbol table entry and from
+ * `sd.ctor` along `overnext`, holds a symbol that is neither a constructor nor a template: one the constructor search
+ * asserts on or reports (`overloadApply`). Read without the search, `overloadApply` or any analysis: an alias counts
+ * as a constructor only when its analysis already resolved it to one, a template or an overload (the idiom that
+ * merges a named mixin's constructors, `alias __ctor = m.__ctor;`); an overload set ends the walk
+ * (`findStructConstructorRoot` returns before the search). A mixin template's `__ctor`, found by the search through
+ * `importedScopes`, is not seen. No D counterpart.
+ */
+function ctorChainHoldsOther(sd: StructDeclaration): boolean {
+    const seen = new Set<Dsymbol>();
+    for (const root of [sd.symtab !== null ? sd.symtab.lookup(Id.ctor!) : null, sd.ctor]) {
+        for (let d: Dsymbol | null = root; d !== null && !seen.has(d);) {
+            seen.add(d);
+            const fa = d.isFuncAliasDeclaration();
+            const f = fa !== null ? fa.funcalias : d.isFuncDeclaration();
+            const td = d.isTemplateDeclaration();
+            const od = d.isOverDeclaration();
+            const ad = od === null ? d.isAliasDeclaration() : null;
+            if (d.isOverloadSet() !== null)
+                break;
+            if (f !== null) {
+                if (f.isCtorDeclaration() === null)
+                    return true;
+                d = (fa ?? f).overnext;
+            } else if (td !== null)
+                d = td.overnext;
+            else if (od !== null)
+                d = od.overnext;
+            else if (ad !== null) {
+                const a = ad.aliassym;
+                if (a === null || (a.isCtorDeclaration() === null && a.isTemplateDeclaration() === null
+                    && a.isOverDeclaration() === null && a.isOverloadSet() === null))
+                    return true;
+                d = ad.overnext;
+            } else
+                return true;
+        }
+    }
+    return false;
+}
+
+/**
  * The kept-module engine (10 §4.7): whether the error test of `needCopyOrMoveCtor` (dmd/clone.d:1688) may have skipped
  * a result, i.e. whether its body could set any of its four flags without that test, so that the unit running it holds
- * only in a compile with errors (`keepErrorState`). Read without the body's search and `overloadApply`, which can
+ * only in a compile with errors (`keepErrorState`): ungagged ones in the CLI, the gagged ones of the open windows in
+ * both modes (dmd/errors.ts `analysisSeesErrors`). Read without the body's search and `overloadApply`, which can
  * report, analyse an alias or an enum, and assert (error recovery): the constructors are `sd.ctor` (set before the
  * test, dmd/dsymbolsem.d:4831), followed along `overnext`; anything in that chain other than a plain constructor, a
  * `__ctor` in the symbol table that `ctor` does not hold yet, a mixin's scope before `ctor` is set, and a field of an
@@ -1837,10 +1882,26 @@ export function needCopyOrMoveCtor(sd: StructDeclaration, hasCopyCtor: Ref<boole
     needMoveCtor.value = false;
 
     //printf("needCopyOrMoveCtor() %s\n", sd.toChars());
-    if (global.errors !== 0) {
-        if (K.on && keptCtorsSkipped(sd)) keepErrorState(sd);     // the kept-module engine: see keptCtorsSkipped
+    // `if (global.errors)`, read as `analysisSeesErrors` (dmd/errors.ts): in editor mode only the gagged errors of the
+    // open windows skip the search
+    const skips = K.on && keptCtorsSkipped(sd);     // the kept-module engine: the answer may change the flags
+    if (skips)
+        keepReadErrors();
+    if (analysisSeesErrors()) {
+        if (skips) keepErrorState(sd);     // the kept-module engine: see keptCtorsSkipped
         return;
     }
+
+    // Editor mode: a struct whose constructor chain holds a `__ctor` that is neither a constructor nor a template
+    // (`void __ctor(ref S o) {}`, `enum __ctor = 4;`, `alias __ctor = foo;`, before or after a constructor) returns
+    // here with no flag. First in the symbol table, `searchCtor` (dmd/expressionsem.d:19610), run just before by the
+    // struct's semantic, reported it ("... name `__ctor` is not allowed"), so D returns at the test above in every
+    // compile; further along the chain the search below asserts on it (`findMoveAndCopyConstructors`, D's
+    // `assert(ctorDecl)`; ldc2's release build looks for no copy constructor there). It reads only the struct
+    // (`ctorChainHoldsOther`), so kept and fresh compiles agree. Rejected: `sd.errors`, which a gagged error of the
+    // struct also sets (a field's type), where the CLI looks for the constructors. No D counterpart.
+    if (editorMode() && ctorChainHoldsOther(sd))
+        return;
 
     const ctor: Ref<Dsymbol | null> = { value: null };
     if (!findStructConstructorRoot(sd, ctor))

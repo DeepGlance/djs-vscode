@@ -25,8 +25,8 @@
 // before any sibling that also `extends Visitor` at top level.
 import { Visitor } from "./visitor/index.js";
 import {
-    K, KeepUnit, keepDeferred, keepDeferredPass, keepForeignErrors, keepImportedFrom, keepMark, keepPkgMod, keepReq,
-    keepRetried, keepRetry, keepRun, keepSearch, keepSized, keepTree, keepUnwind,
+    K, KeepUnit, keepDeferred, keepDeferredPass, keepForeignErrors, keepFound, keepImportedFrom, keepImportFound,
+    keepMark, keepPkgMod, keepReadErrors, keepReq, keepRetried, keepRetry, keepRun, keepSized, keepTree, keepUnwind,
 } from "../keep.js";
 import { ClassKind } from "./aggregate.js"; // value: interfaceNewScope compares classKind to cpp/objc
 import type { AggregateDeclaration } from "./aggregate.js";
@@ -143,7 +143,7 @@ import { isError, isExpression } from "./dtemplate.js";
 import type { TemplateMixin } from "./dtemplate.js";
 import type { DebugSymbol, VersionSymbol } from "./dversion.js";
 import { enumMemberSemantic, enumSemantic } from "./enumsem.js";
-import { fatal, message } from "./errors.js";
+import { analysisSeesErrors, fatal, message } from "./errors.js";
 import {
     AddAssignExp, ArgumentList, BlitExp, CommaExp, ConstructExp, DeclarationExp, DeleteExp, DotTemplateInstanceExp,
     DotVarExp, EqualExp, ErrorExp, FuncExp, IdentifierExp, IntegerExp, ScopeExp, SliceExp, TupleExp, WANTvalue,
@@ -973,6 +973,14 @@ export function addDeferredSemantic3(s: Dsymbol): void {
 // `__gshared` local is process-global, not a function local: it becomes module state (01 §5).
 let runDeferredSemanticNested = 0;
 
+/**
+ * No D counterpart: `runDeferredSemantic`'s `nested` for the kept-module engine (src/keep.ts `retryNested`), above zero
+ * inside a retry of the deferred symbols, where a nested retry returns at once.
+ */
+export function deferredRetryNested(): number {
+    return runDeferredSemanticNested;
+}
+
 /******************************************
  * dmd/dsymbolsem.d:760 — `void runDeferredSemantic()`.
  * Run semantic() on deferred symbols.
@@ -1030,7 +1038,7 @@ export function runDeferredSemantic(): void {
 }
 
 /// dmd/dsymbolsem.d:807 — `void runDeferredSemantic2()`. Run the pass-1 deferrals to completion,
-/// then drain the pass-2 queue, stopping on the first reported error.
+/// then drain the pass-2 queue, stopping on the first reported error (in editor mode, gagged: `analysisSeesErrors`).
 export function runDeferredSemantic2(): void {
     runDeferredSemantic();
 
@@ -1045,14 +1053,16 @@ export function runDeferredSemantic2(): void {
         // semantic2.ts:197 with the D signature verbatim.
         semantic2(s, null);
 
-        if (global.errors !== 0)
+        if (K.on && i + 1 < a.length)
+            keepReadErrors();       // the kept-module engine: the answer decides whether the rest is drained
+        if (analysisSeesErrors())   // `if (global.errors)`; in editor mode only gagged errors stop (dmd/errors.ts)
             break;
     }
     a.setDim(0);
 }
 
 /// dmd/dsymbolsem.d:825 — `void runDeferredSemantic3()`. Run the pass-2 deferrals, then drain
-/// pass-3, stopping on the first reported error.
+/// pass-3, stopping on the first reported error (in editor mode, gagged: `analysisSeesErrors`).
 export function runDeferredSemantic3(): void {
     runDeferredSemantic2();
 
@@ -1064,7 +1074,9 @@ export function runDeferredSemantic3(): void {
         //printf("[%d] %s semantic3a\n", i, s.toPrettyChars());
         semantic3(s, null);
 
-        if (global.errors !== 0)
+        if (K.on && i + 1 < a.length)
+            keepReadErrors();       // the kept-module engine: the answer decides whether the rest is drained
+        if (analysisSeesErrors())   // `if (global.errors)`; in editor mode only gagged errors stop (dmd/errors.ts)
             break;
     }
     a.setDim(0);
@@ -8396,6 +8408,7 @@ class SearchVisitor extends Visitor {
             // dmd/dsymbolsem.d:7651 — function-local `import dmd.access : symbolIsVisible;`
             // (hoisted, 01 §3). The `(Dsymbol origin, Dsymbol s)` arm of that D overload set is
             // `symbolIsVisibleDsymbol` in access.ts (04 §1B).
+            if (K.on && s2 !== null) keepImportFound(sds, i, s2);   // the kept-module engine: which scope found it
             if (s2 === null || !(this.flags & SearchOpt.ignoreVisibility) && !symbolIsVisibleDsymbol(sds, s2))
                 continue;
             if (s === null) {
@@ -8773,7 +8786,6 @@ class SearchVisitor extends Visitor {
         //printf("%s Module.search('%s', flags = x%x) insearch = %d\n", m.toChars(), ident.toChars(), flags, m.insearch);
         if (m.insearch)
             return this.setResult(null);
-        if (K.on) keepSearch(m);   // the kept-module engine: a kept module is searched only once analysed
 
         /* Qualified module searches always search their imports,
          * even if SearchLocalsOnly
@@ -8796,6 +8808,7 @@ class SearchVisitor extends Visitor {
         this.visitScopeDsymbol(m as unknown as ScopeDsymbol);
         const s = this.result;
         m.insearch = false;
+        if (K.on && s !== null) keepFound(m, this.ident, s);   // the kept-module engine: what the search finds
 
         if (errors === global.errors) {
             // https://issues.dlang.org/show_bug.cgi?id=10752

@@ -1,7 +1,7 @@
 {
   "name": "djs-vscode",
   "displayName": "djs-vscode",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "SEE LICENSE IN LICENSE",
   "description": "D diagnostics, hovers, completion and highlighting from the D frontend itself: djs, the LDC 1.43.0 frontend ported to TypeScript, running inside VS Code with no D toolchain installed",
   "icon": "extension/icon.png",
@@ -244,7 +244,7 @@
     "build": "tsc -p tsconfig.extension.json",
     "test:host": "vitest run -c vitest.extension.config.ts",
     "test:vscode": "node tests/vscode/run.ts",
-    "bundle": "esbuild extension/extension.cts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension/extension.cjs --log-level=warning && esbuild host/compiler.ts host/flags.ts host/ast.ts host/worker.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist/host --log-level=warning",
+    "bundle": "esbuild extension/extension.cts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension/extension.cjs --log-level=warning && esbuild host/compiler.ts host/flags.ts host/ast.ts host/worker.ts --bundle --platform=node --target=node20 --format=esm --minify-whitespace --minify-syntax --outdir=dist/host --log-level=warning",
     "vscode:prepublish": "npm run bundle",
     "package": "vsce package --no-dependencies --readme-path extension/README.md --changelog-path extension/CHANGELOG.md -o \"${DJS_VSCODE_SCRATCH:?set DJS_VSCODE_SCRATCH to the output directory}/\""
   },

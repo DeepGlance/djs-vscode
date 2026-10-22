@@ -1,7 +1,7 @@
 # djs — architecture and guarantees
 
 > STATUS: LIVING — the public description of djs's layout and of what it guarantees to a caller. Owner: Paolo
-> Invernizzi. Updated: 2026-10-13.
+> Invernizzi. Updated: 2026-10-22.
 
 ## Layout
 
@@ -35,8 +35,9 @@ frontend and compiles as a fresh process would. The last compilation's AST stays
 
 **Editor mode.** `djsMain(args, onFatal)` with a handler answering `true` returns from every fatal error and runs
 the next pass, so a module with a parse error or a failed import is still analysed. The output up to the first
-fatal point is ldc2's; what follows has no oracle (some diagnostics repeat). Pass `-o-`. A failed ImportC file stops
-the compile as the CLI does.
+error is ldc2's; what follows has no oracle: an error does not switch analysis off elsewhere (only gagged errors do),
+and past the fatal points some diagnostics repeat. Pass `-o-`. A failed ImportC file stops the compile as the CLI
+does.
 
 **The kept-module engine.** `djsMainKept(args, onFatal, options)` gives the status, stdout, stderr and diagnostic
 handler calls of a fresh compile of the same arguments and files, byte for byte. It re-analyses what changed (a

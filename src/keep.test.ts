@@ -22,6 +22,7 @@ interface KeptRun extends Run {
     mode: string;
     reason: string;
     unitsKept: number;
+    modulesDead: number;
     seeds: Record<string, number>;
 }
 
@@ -68,10 +69,12 @@ function capture<T>(f: () => T): { value: T; stdout: string; stderr: string } {
 /**
  * The steps, in order, in one registry through `djsMainKept`, each followed by `djsMain` in a second registry;
  * the arguments name files relative to the test directory, which is the working directory of both. With
- * `suppress`, each registry gets a diagnostic handler that records its calls and answers `suppress(header)`.
+ * `suppress`, each registry gets a diagnostic handler that records its calls and answers `suppress(header)`. With
+ * `editor`, both compile in editor mode (a fatal handler answering true, 10 §4.7), else as the CLI.
  */
-async function sequence(files: Record<string, string>, steps: Step[], suppress?: (header: string) => boolean):
-    Promise<{ kept: KeptRun; fresh: Run; calls?: { kept: HandlerCalls; fresh: HandlerCalls } }[]> {
+async function sequence(files: Record<string, string>, steps: Step[], suppress?: (header: string) => boolean,
+    editor = false): Promise<{ kept: KeptRun; fresh: Run; calls?: { kept: HandlerCalls; fresh: HandlerCalls } }[]> {
+    const onFatal = editor ? (): boolean => true : undefined;
     dir = mkdtempSync(join(tmpdir(), "djs-keep-"));
     const calls = { kept: [] as HandlerCalls, fresh: [] as HandlerCalls };
     const registry = async (into: "kept" | "fresh"): Promise<typeof import("./djs.js")> => {
@@ -120,11 +123,12 @@ async function sequence(files: Record<string, string>, steps: Step[], suppress?:
             // the keys spelled through the temporary directory's symbolic link (macOS: /var for the working
             // directory's /private/var), which the override resolves
             const options = { texts: new Map(Object.entries(s.texts ?? {}).map(([name, t]) => [join(dir, name), t])) };
-            const k = capture(() => keeping.djsMainKept(s.args, undefined, options));
-            const f = capture(() => reference.djsMain(s.args, undefined, options));
+            const k = capture(() => keeping.djsMainKept(s.args, onFatal, options));
+            const f = capture(() => reference.djsMain(s.args, onFatal, options));
             out.push({
                 kept: { code: k.value.status, stdout: k.stdout, stderr: k.stderr, mode: k.value.mode,
-                    reason: k.value.reason, unitsKept: k.value.stats.unitsKept, seeds: k.value.stats.seeds },
+                    reason: k.value.reason, unitsKept: k.value.stats.unitsKept,
+                    modulesDead: k.value.stats.modulesDead, seeds: k.value.stats.seeds },
                 fresh: { code: f.value, stdout: f.stdout, stderr: f.stderr },
                 ...(suppress === undefined ? {} : { calls: { kept: calls.kept, fresh: calls.fresh } }),
             });
@@ -234,6 +238,18 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
         expect(runs[1]!.kept.seeds["error state cached"]).toBe(1);
     });
 
+    test("main's appended `mixin _d_cmain!()`: its passes 2 and 3 run again in an unchanged recompile", async () => {
+        // an object.d of the program's own, whose _d_cmain prints at its first pass and in C main's body (semantic3)
+        const obj = "module object;\ntemplate _d_cmain() {\n    pragma(msg, \"cmain sem1\");\n"
+            + "    extern(C) int main(int argc, char** argv) { pragma(msg, \"cmain body\"); return _Dmain(); }\n"
+            + "    extern(C) int _Dmain();\n}\n";
+        const args = ["-c", "-o-", "-verrors=0", "-I.", "app.d"];
+        const runs = await sequence({ "object.d": obj, "app.d": "module app;\nint main() { return 0; }\n" },
+            [{ args }, { args }, { args }]);
+        expectFresh(runs, "fkk");
+        expect(runs[2]!.kept.stdout + runs[2]!.kept.stderr).toBe("cmain sem1\ncmain body\n");
+    });
+
     test("a line removed, then restored", async () => {
         const runs = await sequence({ "lib.d": LIB_DEPRECATED, "app.d": APP }, [
             { args: ARGS },
@@ -259,30 +275,224 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
         expect(runs[2]!.kept.stderr).toContain("undefined identifier `extra`");
     });
 
+    /** A library whose `isS` instance retries the deferred symbols at its creation (dmd/templatesem.d:1888). */
+    const LIB_DEFERS = "module lib;\nstruct W(T) { T value; }\ntemplate isS(T) { enum isS = is(T == string); }\n";
+
+    /** A module whose struct waits for its own size (`W!V*`, deferred) while its analysis requests isS!string. */
+    const deferring = (name: string): string => `module ${name};\nimport lib;\nstruct V {\n    W!V* next;\n    int x;\n`
+        + `    enum e = isS!string;\n    pragma(msg, "${name} ", e);\n}\n`;
+
+    /** A root importing `imports`, then requesting isS!string itself. */
+    const deferringApp = (...imports: string[]): string => `module app;\nimport lib;\n`
+        + `${imports.map((m) => `import ${m};\n`).join("")}enum y = isS!string;\npragma(msg, "app ", y);\n`;
+
     test("an import added whose struct is deferred where a kept instance that retries is first requested, then dropped",
         async () => {
             // `W!V` waits for V's size (deferred) while V's analysis requests isS!string, whose creation retries the
-            // deferred symbols (dmd/templatesem.d:1888): kept from a compile where none were, it replays where W!V is
-            // one, and the next compile, without b, where none is again
-            const lib = "module lib;\nstruct W(T) { T value; }\ntemplate isS(T) { enum isS = is(T == string); }\n";
-            const b = "module b;\nimport lib;\nstruct V {\n    W!V* next;\n    int x;\n    enum e = isS!string;\n"
-                + "    pragma(msg, \"V \", e);\n}\n";
-            const app = (imports: string): string => `module app;\nimport lib;\n${imports}enum y = isS!string;\n`
-                + "pragma(msg, \"app \", y);\n";
-            const runs = await sequence({ "lib.d": lib, "b.d": b, "app.d": app("") }, [
+            // deferred symbols: kept from a compile where none were, it replays where W!V is one, and the next
+            // compile, without b, where none is again. The import added again: b's kept analysis puts back W!V,
+            // analysed already, among the deferred symbols, where a fresh compile's is still deferred; the list is
+            // one isS!string's replay was proved under when b was first added (`prove`), so it holds without the
+            // retry, which would find W!V done
+            const runs = await sequence({ "lib.d": LIB_DEFERS, "b.d": deferring("b"), "app.d": deferringApp() }, [
                 { args: ARGS },
-                { files: { "app.d": app("import b;\n") }, args: ARGS },
-                { files: { "app.d": app("") }, args: ARGS },
-                { files: { "app.d": app("import b;\n") }, args: ARGS },
+                { files: { "app.d": deferringApp("b") }, args: ARGS },
+                { files: { "app.d": deferringApp() }, args: ARGS },
+                { files: { "app.d": deferringApp("b") }, args: ARGS },
                 { args: ARGS },
+                { files: { "app.d": deferringApp() }, args: ARGS },
+                { files: { "app.d": deferringApp("b") }, args: ARGS },
             ]);
-            // the import added again: b's kept analysis puts back W!V, analysed already, among the deferred symbols
-            // where a fresh compile's is still deferred, and the retry at isS!string's replay finds it done
-            expectFresh(runs, "fkkfk");
-            expect(runs[1]!.kept.stderr).toBe("V true\napp true\n");
-            expect(runs[3]!.kept.reason).toBe("abort: other deferred symbols at the replay of lib.isS!string, whose "
+            expectFresh(runs, "fkkkkkk");
+            expect(runs[1]!.kept.stderr).toBe("b true\napp true\n");
+        });
+
+    test("past the proved lists' bound, the list used longest ago is probed again, and a retry finding it done aborts",
+        async () => {
+            // isS!string proved under [] (used again at every drop), b1's W!V, then b2's, b3's, b4's: the bound (4)
+            // drops b1's list, the one used longest ago; b1 added again is probed and aborts as without the lists
+            const mods = ["b1", "b2", "b3", "b4"];
+            const steps: Step[] = [{ args: ARGS }];
+            for (const m of mods)
+                steps.push({ files: { "app.d": deferringApp(m) }, args: ARGS }, { files: { "app.d": deferringApp() },
+                    args: ARGS });
+            steps.push({ files: { "app.d": deferringApp("b1") }, args: ARGS });
+            const runs = await sequence({ "lib.d": LIB_DEFERS, "app.d": deferringApp(),
+                ...Object.fromEntries(mods.map((m) => [`${m}.d`, deferring(m)])) }, steps);
+            expectFresh(runs, "fkkkkkkkkf");
+            expect(runs[9]!.kept.reason).toBe("abort: other deferred symbols at the replay of lib.isS!string, whose "
                 + "retry of them does work");
         });
+
+    test("a proved list a replay matches is the last one the bound drops", async () => {
+        // b1's list used again at step 6 outlives b2's: past the bound, b1 added again at step 12 still keeps
+        const order = ["b1", "b2", "b1", "b3", "b4", "b1"];
+        const steps: Step[] = [{ args: ARGS }];
+        for (const m of order)
+            steps.push({ files: { "app.d": deferringApp(m) }, args: ARGS }, { files: { "app.d": deferringApp() },
+                args: ARGS });
+        steps.pop();
+        const runs = await sequence({ "lib.d": LIB_DEFERS, "app.d": deferringApp(),
+            ...Object.fromEntries(["b1", "b2", "b3", "b4"].map((m) => [`${m}.d`, deferring(m)])) }, steps);
+        expectFresh(runs, "fkkkkkkkkkkk");
+    });
+
+    test("a list a retry inside an outer one proved nothing for is probed outside one", async () => {
+        // f's semantic3 runs inside the root's retry (W2!R waits for R's size), where isS!string's creation retry
+        // returns at once: that list is not taken as proved, so the replay from an enum outside every retry probes
+        // it, and a fresh compile's order (W!L's g between) is kept
+        const lib = "module lib;\nstruct W(T) { T value; void g() { pragma(msg, \"W.g \", T.stringof); } }\n"
+            + "template isS(T) { enum isS = is(T == string); }\n";
+        const b = "module b;\nimport lib;\nauto f() {\n    static struct L { W!L* p; int x; }\n"
+            + "    return isS!string;\n}\n";
+        const v1 = "module app;\nimport lib;\nenum y = isS!string;\npragma(msg, \"app \", y);\n";
+        const vN = "module app;\nimport lib;\nimport b;\nstruct W2(T) { T value; void h() { enum q = f(); } }\n"
+            + "struct R { W2!R* next; int x; }\n";
+        const vM = "module app;\nimport lib;\nimport b;\nenum q = f();\npragma(msg, \"app \", q);\n";
+        const runs = await sequence({ "lib.d": lib, "b.d": b, "app.d": v1 }, [
+            { args: ARGS },
+            { files: { "app.d": vN }, args: ARGS },
+            { files: { "app.d": v1 }, args: ARGS },
+            { files: { "app.d": vM }, args: ARGS },
+        ]);
+        expectFresh(runs, "fkkf");
+        expect(runs[3]!.fresh.stdout + runs[3]!.fresh.stderr).toBe("W.g L\napp true\n");
+    });
+
+    test("a struct an instance deferred, completed by the module's retry before the next instance is requested",
+        async () => {
+            // E's field type creates Arr!E, whose struct waits for E's size (deferred) past the creation; the module's
+            // retry after E (dmd/dsymbolsem.d:3872) completes it, and Arr!int, whose creation retries the deferred
+            // symbols, is requested where none is: its replay must find none either (`learnDeferred`)
+            const app = "module app;\nstruct Arr(T) { T[1] small; }\nstruct E { Arr!E* p; }\nArr!int g;\n"
+                + "pragma(msg, Arr!E.sizeof, \" \", Arr!int.sizeof);\n";
+            const runs = await sequence({ "app.d": app }, [{ args: ARGS }, { args: ARGS }]);
+            expectFresh(runs, "fk");
+            expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toBe("8LU 4LU\n");
+        });
+
+    test("a library struct an alias's instance deferred, completed by the module's retry before the next instance",
+        async () => {
+            // E's field type names the alias Es, analysed at its first use (a non-root module's alias): its instance
+            // Arr!E leaves its struct deferred past the alias's unit, which returns into lib's semantic1 (`keepUnwind`)
+            const lib = "module lib;\nstruct Arr(T) { T[1] small; }\nalias Es = Arr!E;\nstruct E { Es* p; }\n"
+                + "Arr!int g;\npragma(msg, Arr!E.sizeof, \" \", Arr!int.sizeof);\n";
+            const runs = await sequence({ "lib.d": lib, "app.d": "module app;\nimport lib;\n" }, [
+                { args: ARGS },
+                { args: ARGS },
+            ]);
+            expectFresh(runs, "fk");
+            expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toBe("8LU 4LU\n");
+        });
+
+    test("a lookup that passes through a kept module before its semantic and finds nothing there", async () => {
+        // app's `size_t` is looked up before `import b;` runs b's semantic1, where b's importAll made it searchable:
+        // the search passes through b, kept and not yet replayed, finds nothing there and `size_t` in object
+        const b = "module b;\nint x;\npragma(msg, \"b\");\n";
+        const app = "module app;\nsize_t n;\nimport b;\npragma(msg, \"app \", n.sizeof);\n";
+        const runs = await sequence({ "b.d": b, "app.d": app }, [
+            { args: ARGS },
+            { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            { args: ARGS },
+        ]);
+        expectFresh(runs, "fkk");
+        expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toBe("b\napp 8LU\n");
+    });
+
+    test("a library struct the root analysed before the library's semantic, then the root edited", async () => {
+        // app's `S.sizeof` comes before `import b;`: the lookup finds S unanalysed, and app's analysis of it prints;
+        // with app edited, b is dropped with it (`peeks`), so that the live lookup finds S unanalysed again
+        const b = "module b;\nstruct S { pragma(msg, \"S analysed\"); int x; }\n";
+        const app = "module app;\nenum v = S.sizeof;\nimport b;\npragma(msg, \"app \", v);\n";
+        const runs = await sequence({ "b.d": b, "app.d": app }, [
+            { args: ARGS },
+            { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            { files: { "app.d": app }, args: ARGS },
+        ]);
+        expectFresh(runs, "fkk");
+        expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toBe("S analysed\napp 4LU\n");
+        expect(runs.map((r) => r.kept.modulesDead)).toEqual([0, 2, 2]);
+    });
+
+    test("a lookup through a kept module whose semantic made public an import it had private, then the root edited",
+        async () => {
+            // b imports c privately, then `static if` imports it again publicly, which only raises the import's
+            // visibility (ScopeDsymbol.importScope): a fresh compile's search before b's semantic1 skips c and reports
+            // X undefined, the kept b holds c public and would find it, so the edited root's lookup aborts there
+            const c = "module c;\nenum int X = 5;\n";
+            const b = "module b;\nimport c;\nstatic if (true) public import c;\n";
+            const app = "module app;\nstatic import c;\nenum y = X;\npragma(msg, y);\nimport b;\n";
+            const runs = await sequence({ "c.d": c, "b.d": b, "app.d": app }, [
+                { args: ARGS },
+                { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            ]);
+            expectFresh(runs, "ff");
+            expect(runs[1]!.kept.reason).toBe("abort: lookup into b before its semantic finds c.X");
+            expect(runs[1]!.kept.stderr).toContain("undefined identifier `X`");
+        });
+
+    test("a lookup through an import a kept module's semantic added, before that semantic, then the root edited",
+        async () => {
+            // b's `static if` import of c is added by b's semantic1: before it, a fresh compile's search of b misses X,
+            // the kept b holds the scope and would find it
+            const app = "module app;\nimport d;\nstatic if (is(typeof(X))) enum v = 1; else enum v = 2;\nimport b;\n"
+                + "pragma(msg, \"app \", v);\n";
+            const runs = await sequence({ "c.d": "module c;\nint X;\n", "d.d": "module d;\nimport c;\n",
+                "b.d": "module b;\nstatic if (true) public import c;\n", "app.d": app }, [
+                { args: ARGS },
+                { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            ]);
+            expectFresh(runs, "ff");
+            expect(runs[1]!.kept.reason).toBe("abort: lookup into b before its semantic finds c.X");
+            expect(runs[1]!.kept.stdout + runs[1]!.kept.stderr).toBe("app 2\n");
+        });
+
+    test("a lookup through a kept module's importAll-time import, before its semantic, which added another",
+        async () => {
+            // X through b's public import, which importAll added; b's semantic1 adds a private import: a fresh
+            // compile's search before that semantic finds X the same way
+            const app = "module app;\nimport c;\nenum v = X.sizeof;\nimport b;\npragma(msg, \"app \", v);\n";
+            const runs = await sequence({ "c.d": "module c;\nint X;\n", "d.d": "module d;\n",
+                "b.d": "module b;\npublic import c;\nstatic if (true) import d;\n", "app.d": app }, [
+                { args: ARGS },
+                { files: { "app.d": "// edited\n" + app }, args: ARGS },
+                { files: { "app.d": "// edited twice\n" + app }, args: ARGS },
+            ]);
+            expectFresh(runs, "fkk");
+        });
+
+    test("a private selective import's alias found before its module's semantic, then the finder edited", async () => {
+        // the alias's visibility is its semantic's (dmd/dsymbolsem.d:2124): before b's semantic1 app's import loop
+        // takes it, and `toAlias` runs b's import there (dmd/dsymbolsem.d:1499-1504), so b is dropped with app
+        const app = "module app;\nimport c;\nenum v = X.sizeof;\nimport b;\npragma(msg, \"app \", v);\n";
+        const runs = await sequence({ "c.d": "module c;\nint X;\n", "b.d": "module b;\nimport c : X;\nint y;\n",
+            "app.d": app }, [
+            { args: ARGS },
+            { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            { files: { "app.d": "// edited twice\n" + app }, args: ARGS },
+        ]);
+        expectFresh(runs, "fkk");
+        expect(runs.map((r) => r.kept.modulesDead)).toEqual([0, 2, 2]);
+    });
+
+    test("a package-qualified name checked through a kept module whose semantic opened the package", async () => {
+        // lib's `static if` public import of pk.b over a private one, a public static one (package access only), or
+        // a mixin's public import (an imported scope only: the mixin's) is its semantic1's: before it, a fresh
+        // compile's check of `pk.b.X` (dmd/access.d:243, Module.isPackageAccessible) finds the package closed
+        const app = "module app;\nimport pk.a;\nenum y = pk.b.X;\npragma(msg, y);\nimport lib;\n";
+        for (const lib of ["import pk.b;\nstatic if (true) public import pk.b;\n",
+            "static if (true) public static import pk.b;\n",
+            "mixin template M() { public import pk.b; }\nmixin M;\n"]) {
+            const runs = await sequence({ "pk/a.d": "module pk.a;\nimport pk.b;\n",
+                "pk/b.d": "module pk.b;\nenum int X = 5;\n", "lib.d": "module lib;\n" + lib, "app.d": app }, [
+                { args: ARGS },
+                { files: { "app.d": "// edited\n" + app }, args: ARGS },
+            ]);
+            expectFresh(runs, "ff");
+            expect(runs[1]!.kept.reason).toBe("abort: package access through lib before its semantic");
+            expect(runs[1]!.kept.stderr).toContain("undefined identifier `b` in package `pk`");
+        }
+    });
 
     test("a library error gagged, then not needed, then ungagged", async () => {
         const lib = "module lib;\nint broken(T)(T t) { return t.nope; }\n";
@@ -296,6 +506,64 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
         expectFresh(runs, "fkkk");
         expect(runs[3]!.kept.stderr).toContain("no property `nope` for `t` of type `int`");
     });
+
+    test("a unit recorded inside a retry of the deferred symbols, replayed outside one with deferred symbols",
+        async () => {
+            // U!1 is first created inside the root's retry (W!R waits for R's size; W!R.f's analysis requests U!1),
+            // where its creation's own retry returns at once; then from an enum outside every retry, while W!R is
+            // deferred: a fresh compile's retry inside U!1's creation completes W!R (its g prints) between U's two
+            // messages
+            const lib = "module lib;\ntemplate U(int n) {\n    pragma(msg, \"U1\");\n    enum a = n;\n"
+                + "    pragma(msg, \"U2\");\n}\n";
+            const v1 = "module app;\nimport lib;\nstruct W(T) { T value; void f() { enum e = U!1.a; } }\n"
+                + "struct R { W!R* next; int x; }\n";
+            const v2 = "module app;\nimport lib;\nstruct W(T) { T value; void g() { pragma(msg, \"D\"); } }\n"
+                + "enum z = R.sizeof + U!1.a;\nstruct R { W!R* next; int x; }\n";
+            const runs = await sequence({ "lib.d": lib, "app.d": v1 },
+                [{ args: ARGS }, { files: { "app.d": v2 }, args: ARGS }]);
+            expectFresh(runs, "ff");
+            expect(runs[1]!.fresh.stdout + runs[1]!.fresh.stderr).toBe("U1\nD\nU2\n");
+            expect(runs[1]!.kept.reason).toBe("abort: other deferred symbols at the replay of lib.U!1, whose retry of "
+                + "them does work");
+        });
+
+    test("a unit that defers, recorded inside a retry of the deferred symbols, replayed outside one", async () => {
+        // T!1 is created inside the root's retry first (W2!R waits for R's size), its struct S deferring W!S; then
+        // from an enum outside every retry, where a fresh compile's retry inside T!1's creation completes W!S (its g
+        // prints) before T's own message
+        const lib = "module lib;\nstruct W(T) { T value; void g() { pragma(msg, \"W.g \", T.stringof); } }\n"
+            + "template T(int n) {\n    struct S { W!S* p; int x; }\n    enum a = n;\n"
+            + "    pragma(msg, \"T after S\");\n}\n";
+        const v1 = "module app;\nimport lib;\nstruct W2(X) { X value; void f() { enum e = T!1.a; } }\n"
+            + "struct R { W2!R* next; int x; }\n";
+        const v2 = "module app;\nimport lib;\nenum z = T!1.a;\npragma(msg, \"app\");\n";
+        const runs = await sequence({ "lib.d": lib, "app.d": v1 },
+            [{ args: ARGS }, { files: { "app.d": v2 }, args: ARGS }]);
+        expectFresh(runs, "ff");
+        expect(runs[1]!.fresh.stdout + runs[1]!.fresh.stderr).toBe("W.g S\nT after S\napp\n");
+        expect(runs[1]!.kept.reason).toBe("abort: inst of lib.T!1 replayed outside a retry of the deferred symbols, "
+            + "recorded inside one");
+    });
+
+    test("a unit whose retry did work, recorded outside a retry of the deferred symbols, replayed inside one",
+        async () => {
+            // f's semantic3 completes W!L in its retry when the root's enum requests it; then inside the root's retry
+            // (W2!R waits for R's size), where a fresh compile's retry inside f returns at once and W!L completes later
+            const lib = "module lib;\nstruct W(T) { T value; void g() { pragma(msg, \"W.g \", T.stringof); } }\n"
+                + "template isS(T) { enum isS = is(T == string); }\n";
+            const b = "module b;\nimport lib;\nauto f() {\n    static struct L { W!L* p; int x; }\n"
+                + "    return isS!string;\n}\n";
+            const vM = "module app;\nimport lib;\nimport b;\nenum q = f();\npragma(msg, \"app \", q);\n";
+            const vN = "module app;\nimport lib;\nimport b;\n"
+                + "struct W2(X) { X value; void h() { enum q = f(); pragma(msg, \"h after\"); } }\n"
+                + "struct R { W2!R* next; int x; }\n";
+            const runs = await sequence({ "lib.d": lib, "b.d": b, "app.d": vM },
+                [{ args: ARGS }, { files: { "app.d": vN }, args: ARGS }, { files: { "app.d": vM }, args: ARGS }]);
+            expectFresh(runs, "fff");
+            expect(runs[1]!.fresh.stdout + runs[1]!.fresh.stderr).toBe("h after\nW.g L\n");
+            expect(runs[1]!.kept.reason).toBe("abort: fsem3 of b.f replayed inside a retry of the deferred symbols, "
+                + "recorded outside one");
+        });
 
     test("the root changes from a module to one that imports it", async () => {
         const a = "module a;\ndeprecated int f() { return 1; }\nint g() { return f(); }\n";
@@ -631,6 +899,176 @@ describe("djsMainKept — a kept compile prints what a fresh one prints", () => 
     });
 });
 
+// Editor mode: the frontend tests of the error count read only the gagged errors of the open windows (dmd/errors.ts
+// `analysisSeesErrors`), so a unit recorded in a compile without errors replays as a fresh compile with errors runs it.
+describe("djsMainKept — editor mode: a kept compile after an error prints what a fresh one prints", () => {
+    /** A library whose structs need their copy constructors looked for (dmd/clone.d:1688). */
+    const LIB_CPCTOR = `module lib;
+struct P { this(this) {} }
+struct C { int x; this(ref return scope inout C o) inout { x = o.x; } }
+struct S { P p; C c; this(ref return scope S o) {} }
+struct Box(T) { T x; C c; }
+`;
+    const appOf = (extra: string): string => `module app;
+import lib;
+void f() { S s; S t = s; Box!int u; auto v = u; }
+${extra}
+void g() { Box!long b; pragma(msg, __traits(hasCopyConstructor, Box!long)); }
+`;
+
+    test("a parse error after a good compile: the library's copy constructors are looked for", async () => {
+        const runs = await sequence({ "lib.d": LIB_CPCTOR, "app.d": appOf("") }, [
+            { args: ARGS },
+            { files: { "app.d": appOf("void h() { int x = ; }") }, args: ARGS },
+            { files: { "app.d": appOf("void h() { int x = 1; }") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs, "fkk");
+        expect(runs[1]!.kept.code).toBe(0);
+        expect(runs[1]!.kept.stderr).toContain("Error: expression expected, not `;`");
+        expect(runs[1]!.kept.stderr).toContain("`struct S` implicitly-generated postblit hides copy constructor");
+        expect(runs[1]!.kept.stderr).toContain("\ntrue\n");
+    });
+
+    test("semantic errors under -verrors=2, and in another root", async () => {
+        const args = ["-c", "-o-", "-verrors=2", "app.d"];
+        const runs = await sequence({ "lib.d": LIB_CPCTOR, "app.d": appOf("") }, [
+            { args },
+            { files: { "app.d": appOf("void h() { a1(); a2(); a3(); }") }, args },
+            { files: { "app.d": appOf("void h() { a1(); }") }, args },
+            { files: { "app.d": appOf("") }, args },
+        ], undefined, true);
+        expectFresh(runs, "fkkk");
+        expect(runs[1]!.kept.stderr).toContain("error limit (2) reached");
+        expect(runs[2]!.kept.stderr).toContain("\ntrue\n");
+        const two = ["-c", "-o-", "-verrors=0", "app.d", "b.d"];
+        const b = (x: string): string => `module b;\nimport lib;\nvoid k() { ${x} Box!short s; auto t = s; }\n`;
+        const runs2 = await sequence({ "lib.d": LIB_CPCTOR, "app.d": appOf(""), "b.d": b("") }, [
+            { args: two },
+            { files: { "b.d": b("undefinedQ();") }, args: two },
+            { files: { "app.d": appOf("int x = ;") }, args: two },
+        ], undefined, true);
+        expectFresh(runs2, "fkk");
+    });
+
+    test("a root parse error with a semantic error in an imported module, and in a locally imported one", async () => {
+        const lib = (x: string): string => LIB_CPCTOR + "template Def(T) { enum Def = T.sizeof; }\nint[string] aa;\n"
+            + x;
+        const loc = (x: string): string => "module loc;\nstruct L { C2 c; }\n"
+            + "struct C2 { this(ref return scope C2 o) {} }\n" + x;
+        const app = (x: string): string => "module app;\nimport lib;\n"
+            + "void f() { S s; S t = s; Box!int u; auto v = u; }\n"
+            + "void g() { import loc; L l; auto m = l; int[string] a; bool b = a == aa; }\n"
+            + "void k() { pragma(msg, Def!int, __traits(hasCopyConstructor, Box!long)); }\n" + x;
+        const runs = await sequence({ "lib.d": lib(""), "loc.d": loc(""), "app.d": app("") }, [
+            { args: ARGS },
+            { files: { "lib.d": lib("void z() { undefinedX(); }\n") }, args: ARGS },
+            { files: { "app.d": app("void h() { int x = ; }\n") }, args: ARGS },
+            { files: { "lib.d": lib("") }, args: ARGS },
+            { files: { "app.d": app(""), "loc.d": loc("void z() { undefinedX(); }\n") }, args: ARGS },
+            { files: { "app.d": app("void h() { int x = ; }\n") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs, "fkkkkk");
+        expect(runs[3]!.kept.stderr).toContain("`struct S` implicitly-generated postblit hides copy constructor");
+    });
+
+    test("an instance with errors requested twice ungagged leaves no gagged error behind", async () => {
+        // dmd/templatesem.d:1021-1022 add the matched instance's errors to `gaggedErrors` at gag level 0 too; the
+        // editor's reading (`Global.windowErrors`) must not take them, or analysis stops as in the CLI
+        const app = (x: string): string => `module app;\nimport lib;\nvoid foo(X)(X a) { ${x} }\n`
+            + "void h() { foo(1); foo(2); Box!short s; auto t = s; }\n"
+            + "void g() { pragma(msg, __traits(hasCopyConstructor, Box!short)); }\n";
+        const runs = await sequence({ "lib.d": LIB_CPCTOR, "app.d": app("") }, [
+            { args: ARGS },
+            { files: { "app.d": app("undefinedZ();") }, args: ARGS },
+            { files: { "app.d": app("") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs, "fkk");
+        expect(runs[1]!.kept.stderr).toContain("\ntrue\n");
+    });
+
+    test("guard: a gagged error, then a kept instance requested in the same window, recompiled unchanged", async () => {
+        // the replay puts back the window's gagged errors before the request (keep.ts `enterWindow`), in both modes
+        const lib = "module lib;\nstruct Box(T) { T x; }\nenum ok = is(typeof(undefinedY() + Box!int.sizeof));\n";
+        for (const editor of [true, false]) {
+            const runs = await sequence({ "lib.d": lib, "app.d": "module app;\nimport lib;\n" }, [
+                { args: ARGS },
+                { args: ARGS },
+                { files: { "app.d": "module app;\nimport lib;\nint x;\n" }, args: ARGS },
+            ], undefined, editor);
+            expectFresh(runs, "fkk");
+        }
+    });
+
+    test("gagged errors still skip: __traits(compiles) after a gagged error, with a parse error in the root",
+        async () => {
+            const lib = `module lib;
+struct C { int x; this(ref return scope C o) { x = o.x; } }
+struct Box(T) { T x; C c; }
+enum ok = __traits(compiles, { undefinedY(); Box!int b; });
+`;
+            const app = (x: string): string => `module app;\nimport lib;\n`
+                + `void g() { pragma(msg, ok, __traits(hasCopyConstructor, Box!int)); }\n${x}\n`;
+            const runs = await sequence({ "lib.d": lib, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("void h() { int a = ; }") }, args: ARGS },
+                { files: { "app.d": app("void h() { int a = 2; }") }, args: ARGS },
+            ], undefined, true);
+            expectFresh(runs, "fkk");
+            for (const r of runs)
+                expect(r.kept.stderr).toContain("falsefalse\n");
+            expect(runs[1]!.kept.stderr).not.toContain("copy constructor");
+        });
+
+    test("a struct with a function named __ctor and a parse error: no copy constructor search (clone.ts)", async () => {
+        const app = (x: string): string => `module app;\nstruct S { void __ctor(ref S o) {} int a; }\n${x}\n`;
+        const runs = await sequence({ "app.d": app("") }, [
+            { args: ARGS },
+            { files: { "app.d": app("void h() { int x = ; }") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs, "fk");
+        expect(runs[1]!.kept.code).toBe(0);
+        expect(runs[1]!.kept.stderr).toContain("Error: function name `__ctor` is not allowed");
+        expect(runs[1]!.kept.stderr).not.toContain("Internal error");
+        // the same function after a constructor, in its overload chain, where `searchCtor` does not see it
+        const after = (x: string): string => "module app;\n"
+            + "struct S { this(ref return scope S o) {} void __ctor(int x) {} int a; }\n"
+            + `void f() { S a; S b = a; }\n${x}\n`;
+        const runs2 = await sequence({ "app.d": after("") }, [
+            { args: ARGS },
+            { files: { "app.d": after("void h() { int x = ; }") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs2, "fk");
+        expect(runs2[1]!.kept.stderr).not.toContain("Internal error");
+    });
+
+    test.each(["", "version(all)", "static if (true)", "private"])(
+        "a mixin's copy constructor (%s mixin) looked for after an error before the import", async (wrap) => {
+            const lib = "module lib;\n"
+                + "mixin template CpCtor() { this(ref return scope typeof(this) o) { x = o.x + 1; } }\n"
+                + `struct S { int x; ${wrap} mixin CpCtor; }\n`;
+            const app = (x: string): string => `module app;\n${x}\nimport lib;\n`
+                + "void g() { pragma(msg, __traits(hasCopyConstructor, S)); S a; S b = a; }\n";
+            const runs = await sequence({ "lib.d": lib, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("int[1 / 0] zz;") }, args: ARGS },
+                { files: { "app.d": app("") }, args: ARGS },
+            ], undefined, true);
+            expectFresh(runs, "fkk");
+            expect(runs[1]!.kept.stderr).toContain("\ntrue\n");
+        });
+
+    test("a semantic error in the root, then fixed: std.traits instances replay (no abort)", async () => {
+        const app = (x: string): string => `module app;\nimport std.traits;\nvoid f() { ${x} }\n`
+            + "alias F = ubyte[32] function() pure nothrow @nogc @safe;\nvoid g() { pragma(msg, isCallable!F); }\n";
+        const runs = await sequence({ "app.d": app("") }, [
+            { args: ARGS },
+            { files: { "app.d": app("undefinedQ();") }, args: ARGS },
+            { files: { "app.d": app("int q;") }, args: ARGS },
+        ], undefined, true);
+        expectFresh(runs, "fkk");
+    });
+});
+
 describe("djsMainKept — DjsOptions.texts: a buffer compiled in place of its file", () => {
     test("the override's errors, not the disk's; the handler's calls a fresh compile's", async () => {
         const typo = APP.replace("w.f();", "w.g();");
@@ -919,6 +1357,26 @@ describe("djsMainKept — what the end-of-compile semantic3 analyses: an AA type
 });
 
 describe("djsMainKept — what it does not keep, and says why", () => {
+    test("an instance replayed with gagged errors before it, recorded without, aborts (analysisSeesErrors)",
+        async () => {
+            // Box!int is first made in lib2's __traits(compiles) after a gagged error (no copy constructor looked for),
+            // then first by the root, ungagged (looked for); back in lib2's window, its kept record would answer there
+            const lib = "module lib;\nstruct C { int x; this(ref return scope C o) { x = o.x; } }\n"
+                + "struct Box(T) { T x; C c; }\n";
+            const lib2 = "module lib2;\nimport lib;\nenum ok = __traits(compiles, { undefinedY(); Box!int b; });\n";
+            const app = (x: string): string => `module app;\nimport lib;\n${x}\nimport lib2;\n`
+                + "void g() { pragma(msg, ok, __traits(hasCopyConstructor, Box!int)); }\n";
+            const runs = await sequence({ "lib.d": lib, "lib2.d": lib2, "app.d": app("") }, [
+                { args: ARGS },
+                { files: { "app.d": app("Box!int gx;") }, args: ARGS },
+                { files: { "app.d": app("") }, args: ARGS },
+            ]);
+            expectFresh(runs, "fkf");
+            expect(runs[2]!.kept.stderr).toBe("falsefalse\n");
+            expect(runs[2]!.kept.reason)
+                .toBe("abort: inst of lib.Box!int replayed with gagged errors before it, recorded otherwise");
+        });
+
     test("an instance one request created and the same request matches in the next compile aborts", async () => {
         // lib's function body creates T!ubyte and runs its semantic3 there; the root's module-level request creates
         // it first, and lib's then matches, whose replay would run the instance's semantic3 inside lib's body
@@ -1149,6 +1607,25 @@ int impl(S)(S s) if (is(S : long[]) || (isR!S && is(S == long[]))) { return 2; }
         expectFresh(runs, "fkkfkkf");
         expect(runs[3]!.kept.reason).toBe("abort: module tree conflict on foo");
     });
+
+    test("editor mode against the CLI's handler compiles fresh: the tests of the error count read otherwise",
+        async () => {
+            const app = (x: string): string => `module app;\n${x}\nvoid main() {}\n`;
+            dir = mkdtempSync(join(tmpdir(), "djs-keep-"));
+            const cwd = process.cwd();
+            process.chdir(dir);
+            try {
+                writeFileSync(join(dir, "app.d"), app("int[1 / 0] zz;"));
+                vi.resetModules();
+                const djs = await import("./djs.js");
+                const modes = [true, true, false, false, true].map((editor) => capture(() => djs.djsMainKept(ARGS,
+                    editor ? (): boolean => true : undefined)).value);
+                expect(modes.map((r) => (r.mode === "kept" ? "k" : "f")).join("")).toBe("fkfkf");
+                expect(modes[2]!.reason).toBe("the host options changed");
+            } finally {
+                process.chdir(cwd);
+            }
+        });
 
     test("a changed command line compiles fresh", async () => {
         const runs = await sequence({ "lib.d": LIB_DEPRECATED, "app.d": APP }, [

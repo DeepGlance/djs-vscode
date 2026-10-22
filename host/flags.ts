@@ -63,6 +63,14 @@ export function ldcRootArgs(setting: string, root: string): string[] {
 }
 
 /**
+ * Whether the planned command line `planned` makes deprecations errors: the last of `-d`, `-de`, `-dw` is `-de`, as
+ * the compiler reads them, the last one winning (djs refuses the `--de` spelling, `djs: unsupported flag`).
+ */
+export function deprecationsAreErrors(planned: readonly string[]): boolean {
+    return planned.filter((a) => /^-d[ew]?$/.test(a)).at(-1) === "-de";
+}
+
+/**
  * The switch the setting `djs.target` adds when the planned command line `planned` names no target:
  * `-mtriple=<target>`; none when it names one (`-mtriple=<t>` or `-mtriple <t>`) or the setting is empty, the
  * compile then targeting the host's triple, which djs derives from the platform (an arm64 Mac, Linux on aarch64 or

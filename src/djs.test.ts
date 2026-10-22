@@ -838,7 +838,11 @@ describe("broken modules in editor mode: fatal() returns and every pass runs (10
             if (n === 10)
                 expect([...r.passes.keys()].filter((k) => /\.(Size|Shape|after)$/.test(k))).toEqual([]);
             // (d) byte prefix: ldmd2's stderr (the oracle, cut where ldc2's fatal() exits) is the start of the
-            // editor's, so the CLI's lines are its first lines; the rest is djs's own, with no oracle
+            // editor's, so the CLI's lines are its first lines; the rest is djs's own, with no oracle. The contract
+            // (10 §4.7) promises ldc2's output only up to the first error; on these modules the stronger form holds
+            // because nothing analysed between the defect and the CLI's stop reaches a test of the error count that
+            // editor mode answers otherwise (dmd/errors.ts `analysisSeesErrors`: no struct with a copy constructor,
+            // no deferred semantic2/3 entry left)
             expect(r.stdout).toBe("");
             expect(r.stderr.startsWith(cli.replace(/\brec\d\d\.d\(/g, `${dir}/$&`))).toBe(true);
         } finally {

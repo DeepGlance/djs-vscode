@@ -32,7 +32,8 @@ build's ldc2 command line in `djs.ldc2Line` (see [Settings](#settings)).
   compile only imports, in branches not compiled, and names spelled inside a string mixin's text.
 - **Rename** over those references. Refused, with the reason, where a use could be missed: a name declared in a
   module the compile only imports (Phobos, druntime), a special function, a name D calls implicitly (`opBinary`,
-  `front`, `empty`, `toString`, ...), a name a string mixin spells; and a new name the scope already declares.
+  `front`, `empty`, `toString`, ...), a name a string mixin spells or a branch not compiled (dimmed) uses, whose uses
+  there the references miss; and a new name the scope already declares.
 - **Signature help** on `(` and `,`: the overload the compiler picked first, then the others, the argument under the
   cursor highlighted, with the doc summary; a template's instance with its types substituted.
 - **Completion** after a dot: members, then UFCS candidates, then built-in properties; while a name is typed, or on
@@ -43,6 +44,8 @@ build's ldc2 command line in `djs.ldc2Line` (see [Settings](#settings)).
 - **Inlay hints**: the inferred type of `auto` variables and inferred return types, parameter names at call sites,
   how many instances a template has.
 - **Inactive code dimmed**: the `version`, `debug` and `static if` branches your target and flags do not compile.
+  There hover, go to definition, signature help, references, semantic highlighting and inlay hints give nothing, and
+  rename is refused; completion still offers the names of the compiled scope.
 - **Unused code**: the declarations the program's `main` cannot reach (functions, methods, templates, aggregates,
   enums, mutable globals) greyed out in the modules the compile analysed, for your target and flags, the reason on
   hover; **djs: Show Unused Code** lists them. A name used in a branch not compiled or in a unittest keeps a
@@ -125,13 +128,13 @@ without it. To use djs alone in a workspace: Extensions view, code-d, **Disable 
 - **Fresh compiles**: the first compile of a session, a changed command line, a refused flag or an aborted compile
   analyse everything again; the status bar reads `fresh` and its tooltip says why. Later compiles reanalyse only
   the changes (under a second for a one-line edit in that program).
-- **A half-typed line**: a compile of a file with a syntax error, after a good one, may report a deprecation a
-  compile from scratch would not, and leave some symbols analysed that it would skip. It clears at the next
-  compile without the syntax error.
+- **After an error**: the analysis goes on as without it, so a file with a syntax or a type error keeps its other
+  diagnostics (a deprecation, a second independent error) where ldc2 may stop reporting after the first one.
 - **Completion** answers from the last compile, one compile behind the text: a local declared since is offered after
-  the next compile. After a dot it lists the compiler-generated `_init` first.
-- **Large codebases**: on some (the DMD frontend in LDC's sources, for one) the kept engine does not keep, and every
-  compile is fresh, 2-3 s.
+  the next compile.
+- **Large import cycles**: an edit reanalyses every module of the edited file's import cycle. In the DMD frontend
+  (LDC's sources) that is some 90 modules, about two thirds of a compile from scratch; an unchanged save takes tens of
+  milliseconds. A lookup placed above the imports of a widely imported module costs the same at every edit.
 - **`djs.ldc2Line`** also accepts ldmd2's spellings, `-version=X` among them, which ldc2 itself refuses.
 - **No codegen**: djs is a frontend. It does not build, run or debug programs; keep your build tool for that.
 

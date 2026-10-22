@@ -295,6 +295,8 @@ void f(T)(T value) { int count = 2; count += value; }
 version (none) { void g() { int count; count++; } }
 int h(int n) { static if (false) { int count; count++; } return n; }
 enum E { a = 1 }
+version (none) { T1 dead = T1(k()); }
+void d() { debug { T1 t; t.x = k(); } else { S1 s; } version (none) T1 u; }
 int k() { return E.a; }
 struct T1 { int x; int len() { return x; } }
 struct S1 { T1 x; T1 len() { return x; } }
@@ -306,13 +308,33 @@ size_t pz(R* r) { return r.q.bits.length; }
 
     test("no answer in code the analysis skipped; a folded enum member answers", () => {
         compile({ "fb.d": FB }, "fb.d", true);
-        // an uninstantiated template, a `version (none)` block, a `static if (false)` statement: the module's
-        // `count` and `value` are other declarations
+        // an uninstantiated template: the module's `count` and `value` are other declarations
         expect(said(hover("fb.d", FB, "count +="))).toBe("miss: no symbol at the position");
         expect(said(hover("fb.d", FB, "value;", 1))).toBe("miss: no symbol at the position");
-        expect(said(hover("fb.d", FB, "count++"))).toBe("miss: no symbol at the position");
-        expect(said(hover("fb.d", FB, "count++", 1))).toBe("miss: no symbol at the position");
         expect(said(hover("fb.d", FB, "E.a", 0, 2))).toBe("enum member fb.E.a");
+    });
+
+    test("nothing in a branch not compiled, a type's and a function's name included; the same names outside", () => {
+        const inactive = `miss: ${djs.INACTIVE_REASON}`;
+        // a `version (none)` block, a `static if (false)` statement, a `debug` block without -debug, a brace-less one
+        for (const [token, nth, skip] of [["count++", 0, 0], ["count++", 1, 0], ["T1 dead", 0, 0], ["T1(k", 0, 0],
+            ["k());", 0, 0], ["T1 t", 0, 0], ["x = k", 0, 0], ["k(); }", 0, 0], ["T1 u", 0, 0]] as const) {
+            expect(said(hover("fb.d", FB, token, nth, skip))).toBe(inactive);
+            expect(target(definition("fb.d", FB, token, nth, skip))).toBe(inactive);
+        }
+        expect(said(hover("fb.d", FB, "S1 s"))).toBe("struct fb.S1");     // the `else` branch, compiled
+        expect(said(hover("fb.d", FB, "k() {"))).toBe("function fb.k");
+        // the signature help, the references and the rename too; completion still offers the compiled scope's names
+        const fb = join(dir, "fb.d");
+        const p = (token: string, skip = 0): { line: number; character: number } => at(FB, token, 0, skip);
+        const reason = (a: { result: unknown } | Djs.QueryMiss): string => ("reason" in a ? a.reason : "answered");
+        expect(reason(djs.querySignatureHelp(fb, p("k());", 2).line, p("k());", 2).character, FB)))
+            .toBe(djs.INACTIVE_REASON);
+        expect(reason(djs.queryReferences(fb, p("T1 dead").line, p("T1 dead").character, FB)))
+            .toBe(djs.INACTIVE_REASON);
+        expect(reason(djs.queryPrepareRename(fb, p("T1 t").line, p("T1 t").character, FB))).toBe(djs.INACTIVE_REASON);
+        const names = djs.queryCompletion(fb, FB, p("k(); }", 1)).result?.items.map((i) => i.label) ?? [];
+        expect(names).toContain("k");
     });
 
     test("each access of a chain names its own member: two of one name, a call between, a pointer", () => {
@@ -1582,6 +1604,7 @@ struct Pt {
     int len(int k) const { return k; }
     @property int area() const { return x * y; }
     void touch() { this.x = 1; }
+    static void _init() {}
 }
 class Base { int baseField; void baseMethod() {} }
 class Derived : Base { int own; void m() { super.baseMethod(); } }
@@ -1618,10 +1641,11 @@ int use() {
         "2 stringof property"];
 
     test("a struct's members, a UFCS function and a template's instance, the built-in properties", () => {
+        // by label ignoring case, a name with a leading `_` last (dmd's `static void _init()`)
         const a = complete(CP, "p.", 1);
-        expect(labels(a)).toEqual(["0 Zero constant", "0 area property", "0 count variable", "0 len method",
-            "0 secret field", "0 touch method", "0 x field", "0 y field", "1 doubleX function", "1 norm function",
-            ...BUILTIN, "2 tupleof property"]);
+        expect(labels(a)).toEqual(["0 area property", "0 count variable", "0 len method", "0 secret field",
+            "0 touch method", "0 x field", "0 y field", "0 Zero constant", "0 _init method", "1 doubleX function",
+            "1 norm function", ...BUILTIN, "2 tupleof property"]);
         const items = new Map(a.result!.items.map((i) => [i.label, i]));
         expect(items.get("x")).toMatchObject({ detail: "int x", documentation: "The x coordinate." });
         expect(items.get("len")!.detail).toBe("const int len() (+1 overloads)");
@@ -1636,16 +1660,16 @@ int use() {
 
     test("a class with its base class's members; `this.` and `super.`; a type's static members", () => {
         // object.Object's members too; not object.d's `setSameMutex(shared Object, ...)`: a plain value is not shared
-        expect(labels(complete(CP, "d."))).toEqual(["0 Monitor interface", "0 baseField field", "0 baseMethod method",
-            "0 factory method", "0 m method", "0 opCmp method", "0 opEquals method", "0 own field", "0 toHash method",
-            "0 toString method", "2 alignof property", "2 classinfo property", ...BUILTIN.slice(1),
+        expect(labels(complete(CP, "d."))).toEqual(["0 baseField field", "0 baseMethod method", "0 factory method",
+            "0 m method", "0 Monitor interface", "0 opCmp method", "0 opEquals method", "0 own field",
+            "0 toHash method", "0 toString method", "2 alignof property", "2 classinfo property", ...BUILTIN.slice(1),
             "2 tupleof property"]);
         expect(labels(complete(CP, "this.")).filter((l) => l.startsWith("0 "))).toContain("0 secret field");
         expect(labels(complete(CP, "super.")).filter((l) => l.startsWith("0 b"))).toEqual(["0 baseField field",
             "0 baseMethod method"]);
         expect(labels(complete(CP, "super.")).filter((l) => l.startsWith("0 o"))).not.toContain("0 own field");
-        expect(labels(complete(CP, "Pt.")).filter((l) => l.startsWith("0 "))).toEqual(["0 Zero constant",
-            "0 count variable"]);
+        expect(labels(complete(CP, "Pt.")).filter((l) => l.startsWith("0 "))).toEqual(["0 count variable",
+            "0 Zero constant", "0 _init method"]);
     });
 
     test("a module through a renamed import: its public members; an enum's members", () => {
@@ -1752,8 +1776,8 @@ void never(T)(T t) { int z = 0; }
             : a.result.items.filter((i) => groups.includes(i.group)).map((i) => `${i.group} ${i.label} ${i.kind}`);
     }
 
-    const MODULE = ["2 Base class", "2 Derived class", "2 Pt struct", "2 blocks function", "2 broken function",
-        "2 global variable", "2 io module", "2 never function", "2 object module", "2 sclib module", "2 twice function",
+    const MODULE = ["2 Base class", "2 blocks function", "2 broken function", "2 Derived class", "2 global variable",
+        "2 io module", "2 never function", "2 object module", "2 Pt struct", "2 sclib module", "2 twice function",
         "2 user function"];
 
     test("locals declared before, in a block still open; parameters, a nested function; the module's names", () => {
@@ -1789,8 +1813,8 @@ void never(T)(T t) { int z = 0; }
         expect(labels(complete(SC, "const { return x", 0, 1), [1]))
             .toEqual(members.filter((l) => !l.includes("touch")));
         expect(labels(complete(SC, "{ return count", 0, 5), [1])).toEqual(["1 count variable", "1 make method"]);
-        expect(labels(complete(SC, "{ own = 1", 0, 7), [1])).toEqual(["1 Monitor interface", "1 baseField field",
-            "1 factory method", "1 m method", "1 opCmp method", "1 opEquals method", "1 own field",
+        expect(labels(complete(SC, "{ own = 1", 0, 7), [1])).toEqual(["1 baseField field", "1 factory method",
+            "1 m method", "1 Monitor interface", "1 opCmp method", "1 opEquals method", "1 own field",
             "1 toHash method", "1 toString method"]);
     });
 
@@ -2377,6 +2401,27 @@ describe("navigation: rename", () => {
         expect(renamed(NV, "w;", "int")).toEqual(["miss: `int` is not a name a declaration can take"]);
         expect(renamed(NV, "T first", "first")).toEqual(["miss: `first` is already used in the template"]);
     });
+
+    test("refused where the name is spelled in a branch not compiled: the references miss those uses", () => {
+        const RN = "module rn;\nint k(int a) { return a; }\nint other(int a) { return a; }\nT1 glob;\n"
+            + "struct T1 { int x; }\nvoid f() {\n    version (none) { glob.x = k(1); }\n"
+            + "    glob.x = k(2) + other(3);\n}\n";
+        try {
+            compile({ "rn.d": RN }, "rn.d", true);
+            const prepare = (token: string): string => {
+                const p = at(RN, token);
+                const a = djs.queryPrepareRename(join(dir, "rn.d"), p.line, p.character, RN);
+                return a.result === null ? `miss: ${a.reason}` : `${a.result.placeholder} ${a.result.range.start.line}`;
+            };
+            const refused = (name: string): string => `miss: \`${name}\` is spelled in a branch not compiled for this `
+                + `target and flags at ${join(dir, "rn.d")}:7: its uses there are not analysed`;
+            expect(prepare("glob.x = k(2)")).toBe(refused("glob"));
+            expect(prepare("k(2)")).toBe(refused("k"));
+            expect(prepare("other(3)")).toBe("other 7");
+        } finally {
+            compile({ "nv.d": NV }, "nv.d", true);
+        }
+    });
 });
 
 /** The signature help at a token: the active signature's label and parameter, then the other labels. */
@@ -2739,6 +2784,20 @@ describe("unused code", () => {
         expect(unused()).toEqual(["miss: the program has no entry: no module of the compile declares a main"]);
         compile({ "ue.d": "module ue;\nvoid main() { nowhere(); }\n" }, "ue.d", true);
         expect(unused()).toEqual(["miss: the last compile reported errors"]);
+    });
+
+    test("an unchanged recompile, kept: a fresh compile's answer (C `main`'s `_Dmain` reached again)", () => {
+        const uk = "module uk;\nint helper() { return 1; }\nint unusedFn() { return 2; }\n"
+            + "int main() { return helper(); }\n";
+        // what a fresh compile answers: `_Dmain`, declared by the `mixin _d_cmain!()` the compile appends for `main`,
+        // is reached from its C `main`
+        const answer = [dead("uk.d", uk, "unusedFn", "function", "uk.unusedFn", "unreferenced")];
+        compile({ "uk.d": uk }, "uk.d", true);
+        expect(unused()).toEqual(answer);
+        for (let i = 0; i < 2; i++) {
+            expect(compile({}, "uk.d", true).mode).toBe("kept");
+            expect(unused()).toEqual(answer);
+        }
     });
 
     test("a query between two kept compiles: the second compile's output is a fresh compile's", async () => {

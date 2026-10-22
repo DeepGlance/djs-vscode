@@ -4,7 +4,8 @@
 // --d-version=Foo, -i and --deps to be dropped) and compile on pause off, src/lib.d, src/app.d with one error after a
 // two-byte character on its line (dmd's byte column 40 is VS Code's character 38). Opening app.d activates the
 // extension and compiles it with no edit and no save, the session's first compile, fresh (`no kept state`, `, fresh` in
-// the status bar), its error on the document; an outline asked before that compile waits for it. An edit adds a
+// the status bar), its error on the document; an outline asked before that compile waits for it; the worker's compile
+// cache is active, in the extension's global storage, and written. An edit adds a
 // second error and the save compiles, kept by the worker's engine. The test checks the diagnostics VS Code holds:
 // lines, UTF-16 characters, the version flag reaching the compiler (no `no Foo`), the import found through the
 // relative -Isrc made absolute. A second save of the same content is kept and leaves the same diagnostics. Showing
@@ -26,14 +27,15 @@
 // workspace, in no folder, is not compiled and the status bar says so. Then compile on pause, turned on: an unsaved
 // edit of app.d compiles from its buffer, kept, its error on the document with no save, and the status bar says
 // `buffer` (an outline asked before that compile ran waits for it); a typed `lib.` completes, through VS Code's
-// completion command, with lib.d's `libValue`, a function, its signature and doc comment's summary, and so does a
-// request without a dot, among the imported modules' names; a call typed gets
+// completion command, with lib.d's `libValue`, a function, its signature and doc comment's summary, in djs's order,
+// and so does a request without a dot, among the imported modules' names, after the module's; a call typed gets
 // lib.d's `twice` from VS Code's signature-help command, which waits for its pause compile. VS Code's rename command
 // renames `libValue` in both files, which saved compile with no new error. Last, app.d saved without errors gives
 // lib.d's unused functions as hints tagged Unnecessary, which the setting turned off clears.
 
 import vscode = require("vscode");
 import assert = require("node:assert/strict");
+import fs = require("node:fs");
 
 async function diagnosticsWithin(uri: vscode.Uri, count: number, ms: number): Promise<vscode.Diagnostic[]> {
     const until = Date.now() + ms;
@@ -51,6 +53,7 @@ type Api = {
     statusText(): string;
     dimmedRanges(uri: string): vscode.Range[];
     explorerItems(view: "instances" | "imports"): Promise<string[]>;
+    compileCacheDir(): string | null;
 };
 
 /** Inlay hints as the assertions read them: line, character, label. */
@@ -93,6 +96,10 @@ async function run(): Promise<void> {
     assert.match(api.statusText(), /, disk, fresh$/);
     assert.deepEqual(shown(vscode.languages.getDiagnostics(uri)),
         ["3:38-39 0 cannot implicitly convert expression `\"a\"` of type `string` to `int`"]);
+    // the compile cache: active in the worker of VS Code's Node, in the global storage, written at the worker's start
+    const cache = api.compileCacheDir();
+    assert.match(cache ?? "null", /[/\\]compile-cache[/\\][^/\\]+-node[^/\\]+[/\\]v\d/);
+    assert.ok(fs.readdirSync(cache!).length > 0, cache!);
 
     const atOpen = api.lastCompile();
     const edit = new vscode.WorkspaceEdit();
@@ -137,7 +144,7 @@ async function run(): Promise<void> {
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
         "vscode.executeDocumentSymbolProvider", vscode.Uri.joinPath(folder.uri, "src", "lib.d"));
     assert.deepEqual(symbols.map((x) => `${x.name} ${x.kind}`), ["lib 1", "libValue 11", "twice 11", "same 11",
-        "four 11", "SameInt 11"]);
+        "four 11", "SameInt 11", "_hidden 11"]);
     assert.equal(symbols[1]!.detail, "int()");
     assert.deepEqual([symbols[1]!.selectionRange.start.line, symbols[1]!.selectionRange.start.character], [2, 4]);
 
@@ -317,14 +324,21 @@ async function run(): Promise<void> {
     assert.ok(libValue, JSON.stringify(completions.items.map((i) => `${labelOf(i)} ${i.kind}`)));
     assert.match(libValue.detail ?? "", /int libValue\(\)/);
     assert.match(String(libValue.documentation), /The library's value/);
-    assert.ok(libValue.sortText?.startsWith("0"));
+    // djs's order, kept by each item's sortText (its index, compared lowercased as VS Code does): lib.d's names by
+    // label, case ignored, a name with a leading `_` last
+    const sortKey = (i: vscode.CompletionItem): string => (i.sortText ?? labelOf(i)).toLowerCase();
+    const bySort = (items: vscode.CompletionItem[]): string[] => [...items]
+        .sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0)).map(labelOf);
+    const libNames = ["four", "libValue", "same", "SameInt", "twice", "_hidden"];
+    assert.deepEqual(bySort(completions.items).filter((l) => libNames.includes(l)), libNames);
     // without a dot, on request: the names in scope, lib.d's `libValue` among the imported modules' (djs's group 3)
     const inScope = await vscode.commands.executeCommand<vscode.CompletionList>(
         "vscode.executeCompletionItemProvider", uri, new vscode.Position(dotLine, "void m() { li".length));
     const imported = inScope.items.find((i) => labelOf(i) === "libValue"
         && i.kind === vscode.CompletionItemKind.Function);
     assert.ok(imported, JSON.stringify(inScope.items.map((i) => `${labelOf(i)} ${i.kind}`)));
-    assert.ok(imported.sortText?.startsWith("3"), imported.sortText);
+    const order = bySort(inScope.items);
+    assert.ok(order.indexOf("main") >= 0 && order.indexOf("main") < order.indexOf("libValue"), JSON.stringify(order));
 
     // signature help on a call just typed, through VS Code's command: asked before the pause compile ran, it waits for
     // it (the compile analyses past the open parenthesis) and gives lib.d's `twice`
@@ -365,8 +379,8 @@ async function run(): Promise<void> {
     assert.ok(afterRename.every((d) => !d.includes("undefined identifier")), JSON.stringify(afterRename));
     assert.match(doc.lineAt(call.line).text, /libNumber\(\)/);
 
-    // unused code: app.d without its errors, saved: lib.d's `four` (nothing calls it) and `twice` (only `four` does)
-    // are hints tagged Unnecessary; the setting off clears them
+    // unused code: app.d without its errors, saved: lib.d's `four` and `_hidden` (nothing calls them) and `twice` (only
+    // `four` does) are hints tagged Unnecessary; the setting off clears them
     const clean = new vscode.WorkspaceEdit();
     clean.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0),
         "module app;\nimport lib;\nvoid main() { int x = libNumber(); }\nversion (Foo) {} else static assert(0);\n");
@@ -378,11 +392,12 @@ async function run(): Promise<void> {
         .filter((d) => d.tags?.includes(vscode.DiagnosticTag.Unnecessary))
         .map((d) => `${d.range.start.line}:${d.range.start.character} ${d.severity} ${d.message}`);
     const unusedBy = Date.now() + 30000;
-    while (unusedOf().length < 2 && Date.now() <= unusedBy)
+    while (unusedOf().length < 3 && Date.now() <= unusedBy)
         await new Promise((r) => setTimeout(r, 200));
     assert.deepEqual(unusedOf(), [
         "3:5 3 unused in this build: function lib.twice, only referenced from unreachable code",
-        "5:4 3 unused in this build: function lib.four, unreferenced"]);
+        "5:4 3 unused in this build: function lib.four, unreferenced",
+        "7:4 3 unused in this build: function lib._hidden, unreferenced"]);
     await vscode.workspace.getConfiguration("djs").update("unusedCode", false, vscode.ConfigurationTarget.Workspace);
     assert.deepEqual(unusedOf(), []);
 }

@@ -185,7 +185,7 @@ import {
     TemplateValueParameter, Tuple, TypeDeduced, definitelyValueParameter, isDsymbol, isError,
     isExpression, isParameter, isTuple, isType, write,
 } from "./dtemplate.js";
-import { error, errorSupplemental, fatal, tip as tipDiagnostic } from "./errors.js";
+import { analysisSeesErrors, error, errorSupplemental, fatal, tip as tipDiagnostic } from "./errors.js";
 import {
     ArgumentLabel, ArgumentList, ArrayExp, ArrayLiteralExp, AssocArrayLiteralExp, BinExp, CallExp,
     CastExp, CommaExp, CondExp, DotTemplateInstanceExp, ErrorExp, Expression, FuncExp, IdentifierExp,
@@ -232,7 +232,9 @@ import {
     toDsymbol, typeSemantic, unSharedOf, unqualify, trySemantic as trySemanticType,
 } from "./typesem.js";
 import { Visitor } from "./visitor/index.js";
-import { K, keepDeferSemantic3, keepInstClose, keepInstMatch, keepInstOpen } from "../keep.js";
+import {
+    K, keepDeferSemantic3, keepErrorState, keepInstClose, keepInstMatch, keepInstOpen, keepReadErrors,
+} from "../keep.js";
 import { SwitchError, assert, assertUnreachable } from "../assert.js";
 import type { DString } from "../dstring.js";
 import { cstr, ds } from "../dstring.js";
@@ -1297,6 +1299,12 @@ export function walkInstanceScopes(inst: TemplateInstance): void {
  */
 export function keptInstanceMatch(inst: TemplateInstance, minst: Module | null, tinst: TemplateInstance | null,
     gagged: boolean): void {
+    // dmd/templatesem.d:1021-1022 — a match counts the instance's errors again, as the live match path does (the
+    // window's gagged count that the tests of the error count read, `analysisSeesErrors`, and the window's result)
+    global.errors += inst.errors ? 1 : 0;
+    global.gaggedErrors += inst.errors ? 1 : 0;
+    if (global.gag !== 0)   // no D counterpart: `Global.windowErrors` takes a match's errors only under gag
+        global.windowErrors += inst.errors ? 1 : 0;
     // dmd/templatesem.d:1029 — `tempinst.inst.gagged = tempinst.gagged;` (when the first one was gagged)
     if (inst.gagged)
         inst.gagged = gagged;
@@ -1463,6 +1471,8 @@ export function templateInstanceSemantic(tempinst: TemplateInstance, sc: Scope, 
         // use the number of errors that happened last time.
         global.errors += tempinst.errors ? 1 : 0;
         global.gaggedErrors += tempinst.errors ? 1 : 0;
+        if (global.gag !== 0)   // no D counterpart: `Global.windowErrors` takes a match's errors only under gag
+            global.windowErrors += tempinst.errors ? 1 : 0;
 
         // If the first instantiation was gagged, but this is not:
         if (tempinst.inst.gagged) {
@@ -3350,8 +3360,19 @@ export function updateTempDecl(ti: TemplateInstance, sc: Scope, s: Dsymbol | nul
         return true;
 
     // Error already issued, just return `false`
-    if (cur.parent === null && global.errors !== 0)
+    // `global.errors`: under gag read as dmd/errors.ts `analysisSeesErrors` (in editor mode the open windows' gagged
+    // errors); at gag level 0 as D in both modes. A parentless symbol here is the trace of an error (fail86.d: the
+    // alias that names itself), and in editor mode the report below would be its cascade; a unit that makes the report
+    // in a compile without errors reported it ungagged and is dropped anyway, and one that returned here after an
+    // error of another unit is marked so (`keepErrorState`). Rejected: testing the symbol's type for `Type.terror`,
+    // which a closed window's gagged error leaves too, where ldc2 reports.
+    if (K.on && cur.parent === null && global.gag !== 0)
+        keepReadErrors();   // the kept-module engine: the answer decides the report
+    if (cur.parent === null && (global.gag === 0 ? global.errors !== 0 : analysisSeesErrors())) {
+        if (K.on && global.gag === 0)
+            keepErrorState(null);   // the kept-module engine: not reported, after an error
         return false;
+    }
 
     if (cur.parent === null && dsymbolsemGetType(cur) !== null) {
         const s2 = toDsymbol(dsymbolsemGetType(cur)!, sc);

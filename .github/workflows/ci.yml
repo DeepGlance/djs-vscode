@@ -22,6 +22,11 @@ jobs:
       # informational until measured there.
       - run: npm run test:host
         continue-on-error: ${{ matrix.os != 'macos-14' }}
+      # The same lanes against the bundle the .vsix ships (npm run bundle replaces dist/host/{compiler,flags,ast,
+      # worker}.js)
+      - run: npm run bundle
+      - run: npm run test:host
+        continue-on-error: ${{ matrix.os != 'macos-14' }}
       - name: package the .vsix (bundle and vsce), not published
         run: npm run package
         env:
